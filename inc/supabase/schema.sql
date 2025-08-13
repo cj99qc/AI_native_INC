@@ -423,3 +423,26 @@ language sql stable as $$
 $$;
 
 grant execute on function public.optimize_route(jsonb[]) to anon, authenticated;
+
+-- RPC: point_within_radius for geofence checking
+create or replace function public.point_within_radius(
+  check_point geography,
+  center_point geography,
+  radius_meters int
+) returns boolean
+language sql stable as $$
+  select st_dwithin(check_point, center_point, radius_meters);
+$$;
+
+grant execute on function public.point_within_radius(geography, geography, int) to anon, authenticated;
+
+-- RPC: calculate_distance between two points in kilometers
+create or replace function public.calculate_distance(
+  point1 geography,
+  point2 geography
+) returns float
+language sql stable as $$
+  select st_distance(point1, point2) / 1000; -- Convert meters to kilometers
+$$;
+
+grant execute on function public.calculate_distance(geography, geography) to anon, authenticated;
