@@ -44,7 +44,7 @@ create table if not exists public.profiles (
   email text unique,
   location jsonb, -- { lat, lng, address?, city?, region?, country? }
   geo_point geography(POINT,4326), -- PostGIS point for spatial queries
-  rating float default 0,
+  rating float default 0 check (rating >= 0 and rating <= 5),
   kyc_status kyc_status default 'pending',
   vehicle_info jsonb, -- For drivers: { type, license_plate, color, model }
   created_at timestamptz default now()
@@ -55,12 +55,12 @@ create table if not exists public.products (
   id uuid primary key default gen_random_uuid(),
   name text not null,
   description text,
-  price numeric(12,2) not null,
+  price numeric(12,2) not null check (price > 0),
   vendor_id uuid not null references public.profiles(id) on delete cascade,
   embedding vector(1536),
-  stock int not null default 0,
+  stock int not null default 0 check (stock >= 0),
   images text[] default '{}',
-  availability_radius_km float default 30,
+  availability_radius_km float default 30 check (availability_radius_km > 0),
   geo_point geography(POINT,4326), -- Vendor location for proximity searches
   created_at timestamptz default now()
 );
@@ -72,9 +72,9 @@ create table if not exists public.orders (
   vendor_id uuid not null references public.profiles(id) on delete cascade,
   parent_order_id uuid references public.orders(id), -- For split orders
   status order_status not null default 'pending',
-  total numeric(12,2) not null default 0,
+  total numeric(12,2) not null default 0 check (total >= 0),
   delivery_type delivery_type default 'asap',
-  surge_factor float default 1.0,
+  surge_factor float default 1.0 check (surge_factor >= 0.5 and surge_factor <= 5.0),
   created_at timestamptz default now()
 );
 
@@ -82,9 +82,9 @@ create table if not exists public.orders (
 create table if not exists public.order_items (
   id uuid primary key default gen_random_uuid(),
   order_id uuid not null references public.orders(id) on delete cascade,
-  product_id uuid not null references public.products(id),
-  quantity int not null,
-  price numeric(12,2) not null
+  product_id uuid not null references public.products(id) on delete restrict,
+  quantity int not null check (quantity > 0),
+  price numeric(12,2) not null check (price > 0)
 );
 
 -- Delivery jobs
@@ -96,7 +96,7 @@ create table if not exists public.delivery_jobs (
   dropoff_location jsonb not null,
   pickup_geo geography(POINT,4326), -- PostGIS points for spatial queries
   dropoff_geo geography(POINT,4326),
-  batch_id uuid, -- Reference to batch_jobs for optimized routing
+  batch_id uuid references public.batch_jobs(id) on delete set null,
   route_points geography(MULTIPOINT,4326), -- Optimized route waypoints
   eta interval,
   current_eta interval, -- AI-updated ETA
@@ -109,10 +109,10 @@ create table if not exists public.auctions (
   id uuid primary key default gen_random_uuid(),
   delivery_job_id uuid not null references public.delivery_jobs(id) on delete cascade,
   start_time timestamptz not null default now(),
-  end_time timestamptz not null,
-  current_bid numeric(12,2),
-  min_bid numeric(12,2) not null default 0,
-  ai_suggested_bid numeric(12,2), -- OpenAI-generated smart bid
+  end_time timestamptz not null check (end_time > start_time),
+  current_bid numeric(12,2) check (current_bid >= 0),
+  min_bid numeric(12,2) not null default 0 check (min_bid >= 0),
+  ai_suggested_bid numeric(12,2) check (ai_suggested_bid >= 0), -- OpenAI-generated smart bid
   status auction_status not null default 'active'
 );
 
@@ -121,7 +121,7 @@ create table if not exists public.bids (
   id uuid primary key default gen_random_uuid(),
   auction_id uuid not null references public.auctions(id) on delete cascade,
   driver_id uuid not null references public.profiles(id) on delete cascade,
-  amount numeric(12,2) not null,
+  amount numeric(12,2) not null check (amount > 0),
   created_at timestamptz default now()
 );
 
@@ -130,10 +130,10 @@ create table if not exists public.payments (
   id uuid primary key default gen_random_uuid(),
   order_id uuid not null references public.orders(id) on delete cascade,
   stripe_session_id text,
-  amount numeric(12,2) not null,
-  platform_fee numeric(12,2) default 0,
-  vendor_payout numeric(12,2) default 0,
-  driver_payout numeric(12,2) default 0,
+  amount numeric(12,2) not null check (amount > 0),
+  platform_fee numeric(12,2) default 0 check (platform_fee >= 0),
+  vendor_payout numeric(12,2) default 0 check (vendor_payout >= 0),
+  driver_payout numeric(12,2) default 0 check (driver_payout >= 0),
   status text,
   created_at timestamptz default now()
 );
@@ -153,7 +153,7 @@ create table if not exists public.cart_items (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id) on delete cascade,
   product_id uuid not null references public.products(id) on delete cascade,
-  quantity int not null default 1,
+  quantity int not null default 1 check (quantity > 0),
   created_at timestamptz default now()
 );
 
@@ -171,7 +171,7 @@ create table if not exists public.kyc_docs (
 create table if not exists public.payouts (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.profiles(id) on delete cascade,
-  amount numeric(12,2) not null,
+  amount numeric(12,2) not null check (amount > 0),
   stripe_transfer_id text,
   stripe_connect_account_id text,
   status text default 'pending',
@@ -183,7 +183,7 @@ create table if not exists public.geofences (
   id uuid primary key default gen_random_uuid(),
   job_id uuid not null references public.delivery_jobs(id) on delete cascade,
   center_point geography(POINT,4326) not null,
-  radius_m int not null default 100,
+  radius_m int not null default 100 check (radius_m > 0),
   trigger_type trigger_type not null,
   notified boolean default false,
   created_at timestamptz default now()
@@ -193,7 +193,6 @@ create table if not exists public.geofences (
 create table if not exists public.batch_jobs (
   id uuid primary key default gen_random_uuid(),
   driver_id uuid not null references public.profiles(id) on delete cascade,
-  job_ids uuid[] not null,
   optimized_route geography(LINESTRING,4326),
   estimated_duration interval,
   status text default 'pending',
@@ -204,19 +203,26 @@ create table if not exists public.batch_jobs (
 create index if not exists idx_products_vendor on public.products(vendor_id);
 create index if not exists idx_orders_customer on public.orders(customer_id);
 create index if not exists idx_orders_vendor on public.orders(vendor_id);
+create index if not exists idx_delivery_jobs_driver on public.delivery_jobs(driver_id);
+create index if not exists idx_delivery_jobs_order on public.delivery_jobs(order_id);
+create index if not exists idx_auctions_delivery_job on public.auctions(delivery_job_id);
+create index if not exists idx_bids_auction on public.bids(auction_id);
+create index if not exists idx_bids_driver on public.bids(driver_id);
+create index if not exists idx_analytics_user on public.analytics_events(user_id);
+create index if not exists idx_analytics_event_type on public.analytics_events(event_type);
+
+-- Vector index with dynamic lists parameter
 create index if not exists idx_products_embedding on public.products using ivfflat (embedding vector_cosine_ops) with (lists = 100);
+
+-- JSON indexes
 create index if not exists idx_profiles_location on public.profiles using gin ((location));
 create index if not exists idx_delivery_pickup on public.delivery_jobs using gin ((pickup_location));
 create index if not exists idx_delivery_dropoff on public.delivery_jobs using gin ((dropoff_location));
-create index if not exists idx_events_data on public.analytics_events using gin ((data));
 
--- Spatial indexes for PostGIS
+-- Spatial indexes for PostGIS (created after all tables)
 create index if not exists idx_profiles_geo_point on public.profiles using gist (geo_point);
 create index if not exists idx_products_geo_point on public.products using gist (geo_point);
-create index if not exists idx_delivery_pickup_geo on public.delivery_jobs using gist (pickup_geo);
-create index if not exists idx_delivery_dropoff_geo on public.delivery_jobs using gist (dropoff_geo);
 create index if not exists idx_delivery_route_points on public.delivery_jobs using gist (route_points);
-create index if not exists idx_geofences_center on public.geofences using gist (center_point);
 create index if not exists idx_batch_route on public.batch_jobs using gist (optimized_route);
 
 -- RLS
@@ -259,11 +265,18 @@ create policy orders_related_read on public.orders for select using (
 drop policy if exists orders_customer_insert on public.orders;
 create policy orders_customer_insert on public.orders for insert with check (auth.uid() = customer_id);
 
--- Update: vendor can update when status >= paid for fulfillment; admin can update; customer can cancel when pending
+-- Update: vendor can update; admin can update; customer can only cancel when pending
 drop policy if exists orders_update_by_role on public.orders;
 create policy orders_update_by_role on public.orders for update using (
-  auth.uid() = vendor_id or exists(select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin') or (auth.uid() = customer_id)
-) with check (true);
+  auth.uid() = vendor_id or 
+  exists(select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin') or 
+  auth.uid() = customer_id
+) with check (
+  -- Customers can only update to cancelled status and only when currently pending
+  case when auth.uid() = customer_id then 
+    (status = 'cancelled')
+  else true end
+);
 
 -- Order items: readable by related parties
 drop policy if exists order_items_read on public.order_items;
@@ -365,17 +378,12 @@ language sql stable as $$
   limit match_count;
 $$;
 
--- Grant execute to anon and authenticated
-grant execute on function public.match_products(vector, float, int) to anon, authenticated;
-
 -- RPC: calculate_eta (dummy heuristic in SQL). For more advanced use, an Edge Function can be used.
 create or replace function public.calculate_eta(distance_km float)
 returns interval language sql stable as $$
   -- Simple heuristic: base 10 minutes + 3 minutes per km, capped at 3 hours
   select make_interval(mins => least(10 + (distance_km * 3)::int, 180));
 $$;
-
-grant execute on function public.calculate_eta(float) to anon, authenticated;
 
 -- RPC: nearest_drivers using PostGIS for spatial queries
 create or replace function public.nearest_drivers(
@@ -393,17 +401,15 @@ language sql stable as $$
     p.id, 
     p.name, 
     p.rating,
-    st_distance(p.geo_point, st_point((search_location->>'lng')::float, (search_location->>'lat')::float)::geography) / 1000 as distance_km,
+    st_distance(p.geo_point, st_setsrid(st_point((search_location->>'lng')::float, (search_location->>'lat')::float), 4326)::geography) / 1000 as distance_km,
     p.vehicle_info
   from public.profiles p
   where p.role = 'driver' 
     and p.geo_point is not null
-    and st_dwithin(p.geo_point, st_point((search_location->>'lng')::float, (search_location->>'lat')::float)::geography, radius_km * 1000)
-  order by p.geo_point <-> st_point((search_location->>'lng')::float, (search_location->>'lat')::float)::geography
+    and st_dwithin(p.geo_point, st_setsrid(st_point((search_location->>'lng')::float, (search_location->>'lat')::float), 4326)::geography, radius_km * 1000)
+  order by p.geo_point <-> st_setsrid(st_point((search_location->>'lng')::float, (search_location->>'lat')::float), 4326)::geography
   limit 50;
 $$;
-
-grant execute on function public.nearest_drivers(jsonb, float) to anon, authenticated;
 
 -- RPC: optimize_route using OpenAI heuristic (placeholder for advanced routing)
 create or replace function public.optimize_route(
@@ -422,8 +428,6 @@ language sql stable as $$
     make_interval(hours => 2) as estimated_duration; -- Placeholder
 $$;
 
-grant execute on function public.optimize_route(jsonb[]) to anon, authenticated;
-
 -- RPC: point_within_radius for geofence checking
 create or replace function public.point_within_radius(
   check_point geography,
@@ -433,8 +437,6 @@ create or replace function public.point_within_radius(
 language sql stable as $$
   select st_dwithin(check_point, center_point, radius_meters);
 $$;
-
-grant execute on function public.point_within_radius(geography, geography, int) to anon, authenticated;
 
 -- RPC: calculate_distance between two points in kilometers
 create or replace function public.calculate_distance(
@@ -446,3 +448,22 @@ language sql stable as $$
 $$;
 
 grant execute on function public.calculate_distance(geography, geography) to anon, authenticated;
+
+-- Function to automatically expire auctions
+create or replace function expire_auctions()
+returns void language plpgsql as $$
+begin
+  update public.auctions 
+  set status = 'expired' 
+  where status = 'active' and end_time < now();
+end;
+$$;
+
+-- Grant execute permissions
+grant execute on function public.match_products(vector, float, int) to anon, authenticated;
+grant execute on function public.calculate_eta(float) to anon, authenticated;
+grant execute on function public.nearest_drivers(jsonb, float) to anon, authenticated;
+grant execute on function public.optimize_route(jsonb[]) to anon, authenticated;
+grant execute on function public.point_within_radius(geography, geography, int) to anon, authenticated;
+grant execute on function public.calculate_distance(geography, geography) to anon, authenticated;
+grant execute on function expire_auctions() to anon, authenticated;

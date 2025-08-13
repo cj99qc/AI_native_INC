@@ -134,12 +134,11 @@ export async function POST(req: NextRequest) {
       ? `LINESTRING(${(routePoints as Array<{lat: number, lng: number}>).map(p => `${p.lng} ${p.lat}`).join(',')})`
       : null
 
-    // Create batch job record
+    // Create batch job record (without job_ids since it's now managed via delivery_jobs.batch_id)
     const { data: batchJob, error: batchError } = await supabase
       .from('batch_jobs')
       .insert({
         driver_id: driverId,
-        job_ids: optimizationResult.optimized_order,
         optimized_route: routeLineString,
         estimated_duration: `${optimizationResult.estimated_duration_minutes} minutes`,
         status: 'pending'
