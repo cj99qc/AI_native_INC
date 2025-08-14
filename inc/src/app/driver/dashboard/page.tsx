@@ -9,7 +9,7 @@ export default async function DriverDashboard() {
   return (
     <div className="mx-auto max-w-6xl space-y-4 p-4">
       <h1 className="text-2xl font-semibold">Driver Dashboard</h1>
-      <div className="rounded border p-4">Available jobs and AI routes (coming soon)</div>
+      <div className="rounded border p-4">Available jobs and optimized routes (coming soon)</div>
     </div>
   )
 }

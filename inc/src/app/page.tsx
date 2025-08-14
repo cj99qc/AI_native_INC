@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Star, MapPin, Clock, Zap, ShoppingBag, Truck, Store, TrendingUp } from 'lucide-react'
 import { useLocation } from '@/providers/LocationProvider'
+import { FeaturedProductsSkeleton } from '@/components/ui/ProductSkeleton'
 import Link from 'next/link'
 
 // Mock data for demo - in real app this would come from your API
@@ -59,12 +60,21 @@ export default function HomePage() {
   const router = useRouter()
   const { location, requestLocation } = useLocation()
   const [userLocation, setUserLocation] = useState<[number, number]>([40.7128, -74.0060])
+  const [isLoadingProducts, setIsLoadingProducts] = useState(true)
 
   useEffect(() => {
     if (location) {
       setUserLocation([location.latitude, location.longitude])
     }
   }, [location])
+
+  // Simulate loading products
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setIsLoadingProducts(false)
+    }, 2000)
+    return () => clearTimeout(timer)
+  }, [])
 
   const handleSearch = (query: string) => {
     router.push(`/search?q=${encodeURIComponent(query)}`)
@@ -171,12 +181,15 @@ export default function HomePage() {
             </Badge>
           </div>
 
-          <Carousel 
-            autoplay 
-            autoplayDelay={5000}
-            className="rounded-xl overflow-hidden"
-          >
-            {featuredProducts.map((product) => (
+          {isLoadingProducts ? (
+            <FeaturedProductsSkeleton />
+          ) : (
+            <Carousel 
+              autoplay 
+              autoplayDelay={5000}
+              className="rounded-xl overflow-hidden"
+            >
+              {featuredProducts.map((product) => (
               <Card key={product.id} className="border-0 shadow-lg bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm">
                 <div className="relative h-64 overflow-hidden">
                   <Image 
@@ -224,6 +237,7 @@ export default function HomePage() {
               </Card>
             ))}
           </Carousel>
+          )}
         </motion.section>
 
         {/* Map Section */}
