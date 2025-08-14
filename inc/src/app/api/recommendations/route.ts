@@ -2,6 +2,17 @@ import { NextResponse } from 'next/server'
 import { createServerSupabase } from '@/lib/supabase/server'
 import { getOpenAI } from '@/lib/openai'
 
+interface Product {
+  id: string
+  name: string
+  description: string
+  price: number
+  vendor_id: string
+  availability_radius_km?: number
+  geo_point?: string | null
+  distance_km?: number
+}
+
 export async function GET() {
   try {
     const supabase = await createServerSupabase()
@@ -77,7 +88,7 @@ export async function GET() {
     }
 
     // Get location-based product recommendations
-    let nearbyProducts = []
+    let nearbyProducts: Product[] = []
     if (profile?.location) {
       const { data: locationProducts } = await supabase
         .from('products')
@@ -108,14 +119,14 @@ export async function GET() {
 
             nearbyProducts.push({
               ...product,
-              distance_km: distance || 0
+              distance_km: typeof distance === 'number' ? distance : 0
             })
           }
         }
 
         // Sort by distance and limit
         nearbyProducts = nearbyProducts
-          .sort((a, b) => a.distance_km - b.distance_km)
+          .sort((a, b) => (a.distance_km || 0) - (b.distance_km || 0))
           .slice(0, 20)
       }
     }
@@ -163,7 +174,7 @@ export async function GET() {
       ...nearbyProducts.map((r) => ({ 
         ...r, 
         source: 'location_based', 
-        weight: Math.max(1, 10 - r.distance_km) // Closer = higher weight
+        weight: Math.max(1, 10 - (r.distance_km || 0)) // Closer = higher weight
       }))
     ]
 

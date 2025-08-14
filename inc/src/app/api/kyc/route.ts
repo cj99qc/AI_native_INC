@@ -107,8 +107,7 @@ export async function POST(req: NextRequest) {
         verification_session_id: verificationSession.id,
         verification_url: verificationSession.url,
         kyc_doc_id: kycDoc.id,
-        status: 'pending',
-        expires_at: verificationSession.expires_at
+        status: 'pending'
       })
 
     } catch (stripeError: unknown) {

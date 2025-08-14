@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
 
     const isAuthorized = profile?.role === 'admin' || 
                         job.driver_id === user.id || 
-                        job.orders.vendor_id === user.id
+                        (Array.isArray(job.orders) && job.orders.some((order: { vendor_id: string }) => order.vendor_id === user.id))
 
     if (!isAuthorized) {
       return NextResponse.json({ error: 'unauthorized' }, { status: 403 })
