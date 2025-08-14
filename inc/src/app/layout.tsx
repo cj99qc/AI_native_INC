@@ -7,6 +7,7 @@ import Footer from '@/components/layout/Footer'
 import { SupabaseProvider } from '@/providers/SupabaseProvider'
 import { CartProvider } from '@/providers/CartProvider'
 import { ToasterProvider } from '@/providers/ToasterProvider'
+import { ThemeProvider } from '@/providers/ThemeProvider'
 
 export const metadata: Metadata = {
   title: "InC - AI-Native Logistics Marketplace",
@@ -34,22 +35,24 @@ export const dynamic = 'force-dynamic'
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <link rel="manifest" href="/manifest.json" />
         <meta name="theme-color" content="#3b82f6" />
         <link rel="apple-touch-icon" href="/icon-192.png" />
       </head>
       <body className="antialiased">{/* className={`${geistSans.variable} ${geistMono.variable} antialiased`} */}
-        <SupabaseProvider>
-          <ToasterProvider>
-            <CartProvider>
-              <Navbar />
-              <main className="min-h-[70vh]">{children}</main>
-              <Footer />
-            </CartProvider>
-          </ToasterProvider>
-        </SupabaseProvider>
+        <ThemeProvider defaultTheme="system" storageKey="inc-ui-theme">
+          <SupabaseProvider>
+            <ToasterProvider>
+              <CartProvider>
+                <Navbar />
+                <main className="min-h-[70vh]">{children}</main>
+                <Footer />
+              </CartProvider>
+            </ToasterProvider>
+          </SupabaseProvider>
+        </ThemeProvider>
         <script
           dangerouslySetInnerHTML={{
             __html: `
