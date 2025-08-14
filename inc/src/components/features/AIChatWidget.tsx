@@ -30,7 +30,7 @@ export default function AIChatWidget({ contextId, contextType }: { contextId?: s
 
   return (
     <div className="rounded border p-3">
-      <div className="mb-2 text-sm font-medium">AI Assistant</div>
+      <div className="mb-2 text-sm font-medium">Help Assistant</div>
       <div className="mb-2 max-h-48 space-y-2 overflow-auto text-sm">
         {messages.map((m, idx) => (
           <div key={idx} className={m.role === 'user' ? 'text-right' : ''}>
