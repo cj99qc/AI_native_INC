@@ -97,7 +97,7 @@ export async function POST(req: NextRequest) {
 
             nearbyProducts.push({
               ...filteredResults.find(r => r.id === product.id)!,
-              distance_km: distance || 0,
+              distance_km: typeof distance === 'number' ? distance : Number(distance) || 0,
               availability_radius_km: product.availability_radius_km
             })
           }
@@ -107,7 +107,7 @@ export async function POST(req: NextRequest) {
         filteredResults = nearbyProducts.sort((a, b) => {
           const simDiff = (b.similarity || 0) - (a.similarity || 0)
           if (Math.abs(simDiff) > 0.1) return simDiff // Significant similarity difference
-          return (a.distance_km || 0) - (b.distance_km || 0) // Then by distance
+          return Number(a.distance_km || 0) - Number(b.distance_km || 0) // Then by distance
         })
       }
     }
