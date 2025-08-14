@@ -11,6 +11,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Star, MapPin, Clock, Zap, ShoppingBag, Truck, Store, TrendingUp } from 'lucide-react'
+import { useLocation } from '@/providers/LocationProvider'
 import Link from 'next/link'
 
 // Mock data for demo - in real app this would come from your API
@@ -56,21 +57,14 @@ const nearbyVendors: MapLocation[] = [
 
 export default function HomePage() {
   const router = useRouter()
+  const { location, requestLocation } = useLocation()
   const [userLocation, setUserLocation] = useState<[number, number]>([40.7128, -74.0060])
 
   useEffect(() => {
-    // Get user's location
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          setUserLocation([position.coords.latitude, position.coords.longitude])
-        },
-        () => {
-          // Location permission denied or error
-        }
-      )
+    if (location) {
+      setUserLocation([location.latitude, location.longitude])
     }
-  }, [])
+  }, [location])
 
   const handleSearch = (query: string) => {
     router.push(`/search?q=${encodeURIComponent(query)}`)
@@ -100,13 +94,13 @@ export default function HomePage() {
           >
             <h1 className="mb-4 text-4xl font-bold tracking-tight text-gray-900 dark:text-white sm:text-6xl">
               <span className="bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-                AI-Native
+                Discover Nearby
               </span>{' '}
-              Local Logistics
+              Deals & Services
             </h1>
             <p className="mx-auto max-w-2xl text-lg text-gray-600 dark:text-gray-300">
-              Discover, order, and get deliveries from local businesses powered by AI. 
-              Voice search, real-time tracking, and smart recommendations.
+              Connect with local businesses, get fast deliveries, and explore your neighborhood. 
+              Voice search, real-time tracking, and personalized recommendations.
             </p>
           </motion.div>
 
@@ -130,7 +124,7 @@ export default function HomePage() {
             className="flex flex-wrap justify-center gap-4"
           >
             {[
-              { icon: Zap, label: 'AI-Powered', color: 'bg-yellow-500' },
+              { icon: Zap, label: 'Smart Matching', color: 'bg-yellow-500' },
               { icon: MapPin, label: 'Location-First', color: 'bg-blue-500' },
               { icon: Clock, label: 'Real-Time', color: 'bg-green-500' },
               { icon: Truck, label: 'Fast Delivery', color: 'bg-purple-500' }
@@ -168,7 +162,7 @@ export default function HomePage() {
                 Featured Products
               </h2>
               <p className="text-gray-600 dark:text-gray-400">
-                AI-curated selections based on your preferences
+                Recommended for You
               </p>
             </div>
             <Badge variant="secondary" className="bg-gradient-to-r from-blue-500 to-purple-500 text-white">
@@ -276,7 +270,7 @@ export default function HomePage() {
             {[
               {
                 title: 'Search Products',
-                description: 'Find exactly what you need with AI-powered search',
+                description: 'Find exactly what you need with smart search and filters',
                 icon: Zap,
                 href: '/search',
                 color: 'from-blue-500 to-cyan-500'

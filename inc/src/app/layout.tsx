@@ -8,10 +8,11 @@ import { SupabaseProvider } from '@/providers/SupabaseProvider'
 import { CartProvider } from '@/providers/CartProvider'
 import { ToasterProvider } from '@/providers/ToasterProvider'
 import { ThemeProvider } from '@/providers/ThemeProvider'
+import { LocationProvider } from '@/providers/LocationProvider'
 
 export const metadata: Metadata = {
-  title: "InC - AI-Native Logistics Marketplace",
-  description: "Premier AI-native, location-first local logistics marketplace for seamless multi-role interactions",
+  title: "InC - Local Logistics Marketplace",
+  description: "Premier local logistics marketplace for seamless multi-role interactions. Connect with businesses, drivers, and customers in your area.",
   manifest: "/manifest.json",
   other: {
     "mobile-web-app-capable": "yes",
@@ -44,13 +45,15 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body className="antialiased">{/* className={`${geistSans.variable} ${geistMono.variable} antialiased`} */}
         <ThemeProvider defaultTheme="system" storageKey="inc-ui-theme">
           <SupabaseProvider>
-            <ToasterProvider>
-              <CartProvider>
-                <Navbar />
-                <main className="min-h-[70vh]">{children}</main>
-                <Footer />
-              </CartProvider>
-            </ToasterProvider>
+            <LocationProvider>
+              <ToasterProvider>
+                <CartProvider>
+                  <Navbar />
+                  <main className="min-h-[70vh]">{children}</main>
+                  <Footer />
+                </CartProvider>
+              </ToasterProvider>
+            </LocationProvider>
           </SupabaseProvider>
         </ThemeProvider>
         <script
