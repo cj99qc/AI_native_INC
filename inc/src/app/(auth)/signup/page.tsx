@@ -1,12 +1,14 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useSupabase } from '@/providers/SupabaseProvider'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { User, Store, Truck, Mail, Lock, Loader2 } from 'lucide-react'
+import { Separator } from '@/components/ui/separator'
+import { User, Store, Truck, Mail, Lock, Loader2, Chrome, Apple } from 'lucide-react'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
 
@@ -14,6 +16,10 @@ type UserRole = 'customer' | 'vendor' | 'driver'
 
 export default function SignupPage() {
   const supabase = useSupabase()
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const redirectTo = searchParams.get('redirect')
+  
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
@@ -42,6 +48,40 @@ export default function SignupPage() {
     }
   }
 
+  async function handleSuccess(userId: string) {
+    // Create profile with selected role
+    const { error: profileError } = await supabase
+      .from('profiles')
+      .insert({
+        id: userId,
+        name,
+        role: selectedRole,
+        onboarding_completed: selectedRole === 'customer',
+        kyc_status: selectedRole === 'driver' ? 'pending' : null
+      })
+
+    if (profileError) {
+      console.error('Error creating profile:', profileError)
+    }
+
+    // Role-based redirects
+    if (redirectTo) {
+      router.push(redirectTo)
+      return
+    }
+
+    switch (selectedRole) {
+      case 'vendor':
+        router.push('/vendor/onboarding')
+        break
+      case 'driver':
+        router.push('/driver/kyc')
+        break
+      default:
+        router.push('/')
+    }
+  }
+
   async function signup() {
     if (!email || !password || !name) {
       setError('Please fill in all fields')
@@ -52,26 +92,53 @@ export default function SignupPage() {
     setError('')
 
     try {
-      const { error: authError } = await supabase.auth.signUp({
+      const { data, error: authError } = await supabase.auth.signUp({
         email,
         password,
         options: {
           data: {
             name,
             role: selectedRole
-          }
+          },
+          emailRedirectTo: `${window.location.origin}/auth/callback${redirectTo ? `?redirect=${redirectTo}` : ''}`
         }
       })
 
       if (authError) {
         setError(authError.message)
-      } else {
-        // Show success message or redirect
-        alert('Check your email to confirm your account.')
+      } else if (data.user && !data.session) {
+        setError('Please check your email to confirm your account before signing in.')
+      } else if (data.user && data.session) {
+        await handleSuccess(data.user.id)
       }
     } catch {
       setError('An unexpected error occurred')
     } finally {
+      setIsLoading(false)
+    }
+  }
+
+  async function signUpWithProvider(provider: 'google' | 'apple') {
+    setIsLoading(true)
+    setError('')
+
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback${redirectTo ? `?redirect=${redirectTo}` : ''}`,
+          queryParams: {
+            signup_role: selectedRole
+          }
+        }
+      })
+
+      if (error) {
+        setError(error.message)
+        setIsLoading(false)
+      }
+    } catch {
+      setError('An unexpected error occurred')
       setIsLoading(false)
     }
   }
@@ -119,20 +186,56 @@ export default function SignupPage() {
                 </TabsList>
                 
                 {Object.entries(roleConfig).map(([role, config]) => (
-                  <TabsContent key={role} value={role} className="mt-2">
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="text-center p-3 rounded-lg bg-gray-50 dark:bg-gray-700"
-                    >
-                      <config.icon className={`h-8 w-8 mx-auto mb-2 p-1.5 rounded-full text-white ${config.color}`} />
-                      <p className="text-sm text-gray-600 dark:text-gray-300">
+                  <TabsContent key={role} value={role} className="mt-3">
+                    <div className="p-3 rounded-lg bg-gray-50 dark:bg-gray-800 border">
+                      <div className="flex items-center gap-3 mb-2">
+                        <div className={`p-2 rounded-full ${config.color}`}>
+                          <config.icon className="h-4 w-4 text-white" />
+                        </div>
+                        <h3 className="font-medium text-gray-900 dark:text-white">
+                          {config.title}
+                        </h3>
+                      </div>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
                         {config.description}
                       </p>
-                    </motion.div>
+                    </div>
                   </TabsContent>
                 ))}
               </Tabs>
+            </div>
+
+            {/* Social Auth */}
+            <div className="space-y-3">
+              <Button
+                onClick={() => signUpWithProvider('google')}
+                disabled={isLoading}
+                variant="outline"
+                className="w-full h-11"
+              >
+                <Chrome className="h-4 w-4 mr-2" />
+                Continue with Google
+              </Button>
+              <Button
+                onClick={() => signUpWithProvider('apple')}
+                disabled={isLoading}
+                variant="outline"
+                className="w-full h-11"
+              >
+                <Apple className="h-4 w-4 mr-2" />
+                Continue with Apple
+              </Button>
+            </div>
+
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <Separator className="w-full" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-background px-2 text-muted-foreground">
+                  Or continue with email
+                </span>
+              </div>
             </div>
 
             {/* Form Fields */}
@@ -144,7 +247,8 @@ export default function SignupPage() {
                 <div className="relative">
                   <User className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
                   <Input
-                    placeholder="John Doe"
+                    type="text"
+                    placeholder="Your full name"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     className="pl-10"
@@ -176,7 +280,7 @@ export default function SignupPage() {
                   <Lock className="absolute left-3 top-2.5 h-4 w-4 text-gray-400" />
                   <Input
                     type="password"
-                    placeholder="Create a strong password"
+                    placeholder="Create a secure password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     className="pl-10"
@@ -223,9 +327,20 @@ export default function SignupPage() {
                 animate={{ opacity: 1 }}
                 className="p-3 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800"
               >
-                <p className="text-xs text-yellow-600 dark:text-yellow-400">
-                  <strong>Note:</strong> {selectedRole === 'vendor' ? 'Business' : 'Driver'} accounts require additional verification after signup.
-                </p>
+                <div className="flex items-start gap-2">
+                  <div className="h-2 w-2 rounded-full bg-yellow-500 mt-1.5 flex-shrink-0" />
+                  <div className="text-xs text-yellow-700 dark:text-yellow-300">
+                    <p className="font-medium mb-1">
+                      {selectedRole === 'vendor' ? 'Business Verification Required' : 'Driver Verification Required'}
+                    </p>
+                    <p>
+                      {selectedRole === 'vendor' 
+                        ? 'You will need to complete business verification and setup before listing products.'
+                        : 'You will need to complete identity verification and background checks before accepting deliveries.'
+                      }
+                    </p>
+                  </div>
+                </div>
               </motion.div>
             )}
           </CardContent>

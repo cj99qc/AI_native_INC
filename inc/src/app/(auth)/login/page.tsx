@@ -1,22 +1,68 @@
 'use client'
 
 import { useState } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { useSupabase } from '@/providers/SupabaseProvider'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Mail, Lock, Loader2, Sparkles } from 'lucide-react'
+import { Separator } from '@/components/ui/separator'
+import { Mail, Lock, Loader2, Sparkles, Chrome, Apple } from 'lucide-react'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
 
 export default function LoginPage() {
   const supabase = useSupabase()
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const redirectTo = searchParams.get('redirect')
+  
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [useMagicLink, setUseMagicLink] = useState(true)
   const [sent, setSent] = useState(false)
   const [error, setError] = useState('')
+
+  async function handleSuccess() {
+    // Get user profile to determine redirect
+    const { data: { user } } = await supabase.auth.getUser()
+    if (user) {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('role, onboarding_completed, kyc_status')
+        .eq('id', user.id)
+        .single()
+
+      if (redirectTo) {
+        router.push(redirectTo)
+        return
+      }
+
+      // Role-based redirects
+      switch (profile?.role) {
+        case 'vendor':
+          if (!profile.onboarding_completed) {
+            router.push('/vendor/onboarding')
+          } else {
+            router.push('/vendor/dashboard')
+          }
+          break
+        case 'driver':
+          if (profile.kyc_status === 'pending' || !profile.kyc_status) {
+            router.push('/driver/kyc')
+          } else {
+            router.push('/driver/dashboard')
+          }
+          break
+        case 'admin':
+          router.push('/admin/dashboard')
+          break
+        default:
+          router.push('/')
+      }
+    }
+  }
 
   async function signInWithPassword() {
     if (!email || !password) {
@@ -35,6 +81,8 @@ export default function LoginPage() {
 
       if (authError) {
         setError(authError.message)
+      } else {
+        await handleSuccess()
       }
     } catch {
       setError('An unexpected error occurred')
@@ -53,7 +101,12 @@ export default function LoginPage() {
     setError('')
 
     try {
-      const { error } = await supabase.auth.signInWithOtp({ email })
+      const { error } = await supabase.auth.signInWithOtp({ 
+        email,
+        options: {
+          emailRedirectTo: `${window.location.origin}/auth/callback${redirectTo ? `?redirect=${redirectTo}` : ''}`
+        }
+      })
       if (!error) {
         setSent(true)
       } else {
@@ -62,6 +115,29 @@ export default function LoginPage() {
     } catch {
       setError('An unexpected error occurred')
     } finally {
+      setIsLoading(false)
+    }
+  }
+
+  async function signInWithProvider(provider: 'google' | 'apple') {
+    setIsLoading(true)
+    setError('')
+
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider,
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback${redirectTo ? `?redirect=${redirectTo}` : ''}`
+        }
+      })
+
+      if (error) {
+        setError(error.message)
+        setIsLoading(false)
+      }
+      // Don't set loading to false here as we're redirecting
+    } catch {
+      setError('An unexpected error occurred')
       setIsLoading(false)
     }
   }
@@ -118,6 +194,39 @@ export default function LoginPage() {
               </motion.div>
             ) : (
               <>
+                {/* Social Auth */}
+                <div className="space-y-3">
+                  <Button
+                    onClick={() => signInWithProvider('google')}
+                    disabled={isLoading}
+                    variant="outline"
+                    className="w-full h-11"
+                  >
+                    <Chrome className="h-4 w-4 mr-2" />
+                    Continue with Google
+                  </Button>
+                  <Button
+                    onClick={() => signInWithProvider('apple')}
+                    disabled={isLoading}
+                    variant="outline"
+                    className="w-full h-11"
+                  >
+                    <Apple className="h-4 w-4 mr-2" />
+                    Continue with Apple
+                  </Button>
+                </div>
+
+                <div className="relative">
+                  <div className="absolute inset-0 flex items-center">
+                    <Separator className="w-full" />
+                  </div>
+                  <div className="relative flex justify-center text-xs uppercase">
+                    <span className="bg-background px-2 text-muted-foreground">
+                      Or continue with
+                    </span>
+                  </div>
+                </div>
+
                 {/* Auth Method Toggle */}
                 <div className="flex rounded-lg bg-gray-100 dark:bg-gray-700 p-1">
                   <button
