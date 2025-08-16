@@ -53,15 +53,15 @@ export default function Navbar() {
       }
       
       if (isVendor || isAdmin) {
-        links.push({ href: '/vendor/dashboard', label: 'Vendor' })
+        links.push({ href: '/dashboard/vendor', label: 'Vendor' })
       }
       
       if (isDriver || isAdmin) {
-        links.push({ href: '/driver/dashboard', label: 'Driver' })
+        links.push({ href: '/dashboard/driver', label: 'Driver' })
       }
       
       if (isAdmin) {
-        links.push({ href: '/admin/dashboard', label: 'Admin' })
+        links.push({ href: '/dashboard/admin', label: 'Admin' })
       }
     }
     
@@ -168,9 +168,9 @@ export default function Navbar() {
                   <>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem asChild>
-                      <Link href={`/${user.role}/dashboard`}>
+                      <Link href={`/dashboard/${user.role}`}>
                         <Package className="mr-2 h-4 w-4" />
-                        {user.role === 'vendor' ? 'Business' : user.role === 'driver' ? 'Driver' : 'Admin'} Dashboard
+                        {user.role === 'vendor' ? 'Business' : user.role === 'driver' ? 'Driver' : user.role === 'admin' ? 'Admin' : 'Customer'} Dashboard
                       </Link>
                     </DropdownMenuItem>
                   </>
