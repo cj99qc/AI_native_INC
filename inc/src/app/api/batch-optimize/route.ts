@@ -70,62 +70,135 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'driver_location_required' }, { status: 400 })
     }
 
-    // Use OpenAI for route optimization with logistics intelligence
-    const openai = getOpenAI()
-    
-    const waypoints = jobs.map(job => ({
-      id: job.id,
-      pickup: job.pickup_location,
-      dropoff: job.dropoff_location,
-      status: job.status
-    }))
-
-    const optimizationPrompt = `
-      You are an expert logistics AI optimizing delivery routes.
-      
-      Driver current location: ${JSON.stringify(driver.location)}
-      Delivery jobs: ${JSON.stringify(waypoints)}
-      Optimization mode: ${optimizationMode}
-      
-      Optimize the route considering:
-      1. Minimize total travel distance/time
-      2. Pick up orders before delivery
-      3. Group nearby pickups/dropoffs
-      4. Account for traffic patterns
-      5. Fuel efficiency if requested
-      
-      Return JSON with:
-      {
-        "optimized_order": [job_ids in optimal sequence],
-        "estimated_duration_minutes": number,
-        "estimated_distance_km": number,
-        "route_waypoints": [ordered lat/lng coordinates],
-        "optimization_score": number (0-100),
-        "fuel_savings_percent": number,
-        "reasoning": "brief explanation"
-      }
-    `
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: optimizationPrompt }],
-      max_tokens: 1000,
-      temperature: 0.1 // Low temperature for consistent optimization
-    })
-
+    // Try new routing service first, fallback to OpenAI if unavailable
     let optimizationResult
+    let usingNewService = false
+    
     try {
-      optimizationResult = JSON.parse(completion.choices[0]?.message?.content || '{}')
-    } catch {
-      // Fallback to simple optimization if parsing fails
-      optimizationResult = {
-        optimized_order: jobIds,
-        estimated_duration_minutes: jobIds.length * 45,
-        estimated_distance_km: jobIds.length * 8,
-        route_waypoints: [],
-        optimization_score: 75,
-        fuel_savings_percent: 15,
-        reasoning: "Fallback optimization applied"
+      // Check if we should use the new routing service
+      const useNewRoutingService = process.env.USE_ROUTING_SERVICE === 'true' || process.env.DOCKER_ENV === 'true'
+      
+      if (useNewRoutingService) {
+        // Prepare data for new routing service
+        const routingServiceUrl = process.env.DOCKER_ENV === 'true' 
+          ? 'http://api_bridge:3001/api/routing/optimize'
+          : process.env.BRIDGE_URL ? `${process.env.BRIDGE_URL}/api/routing/optimize`
+          : 'http://localhost:3001/api/routing/optimize'
+
+        const routingRequest = {
+          batch_id: `batch_${Date.now()}`,
+          orders: jobs.map(job => ({
+            id: job.id,
+            pickup_lat: job.pickup_geo?.coordinates?.[1] || 0, // lat from PostGIS point
+            pickup_lng: job.pickup_geo?.coordinates?.[0] || 0, // lng from PostGIS point  
+            delivery_lat: job.dropoff_geo?.coordinates?.[1] || 0,
+            delivery_lng: job.dropoff_geo?.coordinates?.[0] || 0,
+            priority: 1,
+            estimated_prep_time_minutes: 15
+          })),
+          driver_location: driver.geo_point ? {
+            lat: driver.geo_point.coordinates[1],
+            lng: driver.geo_point.coordinates[0]
+          } : null,
+          algorithm: optimizationMode === 'distance' ? 'heuristic' : 'heuristic'
+        }
+
+        const response = await fetch(routingServiceUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(routingRequest),
+          signal: AbortSignal.timeout(10000) // 10 second timeout
+        })
+
+        if (response.ok) {
+          const routingResult = await response.json()
+          
+          // Transform routing service response to match expected format
+          const pickupStops = routingResult.stops.filter((s: any) => s.stop_type === 'pickup')
+          const optimizedOrderIds = pickupStops
+            .sort((a: any, b: any) => a.sequence - b.sequence)
+            .map((s: any) => s.order_id)
+
+          optimizationResult = {
+            optimized_order: optimizedOrderIds,
+            estimated_duration_minutes: routingResult.estimated_duration_minutes,
+            estimated_distance_km: routingResult.total_distance_km,
+            route_waypoints: routingResult.stops.map((s: any) => ({
+              lat: s.lat,
+              lng: s.lng
+            })),
+            optimization_score: routingResult.optimization_score,
+            fuel_savings_percent: Math.max(0, (100 - routingResult.optimization_score) * 0.3), // Estimate
+            reasoning: `Optimized using ${routingResult.optimization_algorithm} algorithm`
+          }
+          
+          usingNewService = true
+          console.log('Successfully used new routing service')
+        } else {
+          throw new Error(`Routing service returned ${response.status}`)
+        }
+      } else {
+        throw new Error('New routing service disabled')
+      }
+    } catch (error) {
+      console.log('Falling back to OpenAI optimization:', error.message)
+      
+      // Fallback to OpenAI optimization
+      const openai = getOpenAI()
+      
+      const waypoints = jobs.map(job => ({
+        id: job.id,
+        pickup: job.pickup_location,
+        dropoff: job.dropoff_location,
+        status: job.status
+      }))
+
+      const optimizationPrompt = `
+        You are an expert logistics AI optimizing delivery routes.
+        
+        Driver current location: ${JSON.stringify(driver.location)}
+        Delivery jobs: ${JSON.stringify(waypoints)}
+        Optimization mode: ${optimizationMode}
+        
+        Optimize the route considering:
+        1. Minimize total travel distance/time
+        2. Pick up orders before delivery
+        3. Group nearby pickups/dropoffs
+        4. Account for traffic patterns
+        5. Fuel efficiency if requested
+        
+        Return JSON with:
+        {
+          "optimized_order": [job_ids in optimal sequence],
+          "estimated_duration_minutes": number,
+          "estimated_distance_km": number,
+          "route_waypoints": [ordered lat/lng coordinates],
+          "optimization_score": number (0-100),
+          "fuel_savings_percent": number,
+          "reasoning": "brief explanation"
+        }
+      `
+
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: optimizationPrompt }],
+        max_tokens: 1000,
+        temperature: 0.1 // Low temperature for consistent optimization
+      })
+
+      try {
+        optimizationResult = JSON.parse(completion.choices[0]?.message?.content || '{}')
+      } catch {
+        // Ultimate fallback
+        optimizationResult = {
+          optimized_order: jobIds,
+          estimated_duration_minutes: jobIds.length * 45,
+          estimated_distance_km: jobIds.length * 8,
+          route_waypoints: [],
+          optimization_score: 75,
+          fuel_savings_percent: 15,
+          reasoning: "Fallback optimization applied"
+        }
       }
     }
 
@@ -188,7 +261,8 @@ export async function POST(req: NextRequest) {
       success: true,
       batch_id: batchJob.id,
       optimization: optimizationResult,
-      jobs_updated: optimizationResult.optimized_order.length
+      jobs_updated: optimizationResult.optimized_order.length,
+      service_used: usingNewService ? 'routing_service' : 'openai_fallback'
     })
 
   } catch (error) {
