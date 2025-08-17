@@ -1,0 +1,141 @@
+# CREATE FILE: docker-compose.yml
+
+version: '3.8'
+
+services:
+  # Next.js application
+  nextjs:
+    build:
+      context: ./inc
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - DOCKER_ENV=true
+      - BRIDGE_URL=http://api_bridge:3001
+    volumes:
+      - ./inc:/app
+      - /app/node_modules
+    depends_on:
+      - postgres
+      - api_bridge
+    networks:
+      - inc_network
+
+  # API Bridge
+  api_bridge:
+    build:
+      context: ./api
+    ports:
+      - "3001:3001"
+    environment:
+      - DOCKER_ENV=true
+      - PRICING_SERVICE_URL=http://pricing_service:8001
+      - ROUTING_SERVICE_URL=http://routing_service:8002
+      - MATCHING_SERVICE_URL=http://matching_service:8003
+      - ESCROW_SERVICE_URL=http://escrow_service:8004
+      - RAG_SERVICE_URL=http://rag_agent:8005
+    depends_on:
+      - pricing_service
+      - routing_service
+      - matching_service
+      - escrow_service
+      - rag_agent
+    networks:
+      - inc_network
+
+  # Pricing Service
+  pricing_service:
+    build:
+      context: ./services/pricing_service
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+    volumes:
+      - ./config:/app/config:ro
+    networks:
+      - inc_network
+
+  # Routing Service  
+  routing_service:
+    build:
+      context: ./services/routing_service
+    ports:
+      - "8002:8002"
+    environment:
+      - PORT=8002
+    volumes:
+      - ./config:/app/config:ro
+    networks:
+      - inc_network
+
+  # Matching Service
+  matching_service:
+    build:
+      context: ./services/matching_service
+    ports:
+      - "8003:8003"
+    environment:
+      - PORT=8003
+    volumes:
+      - ./config:/app/config:ro
+    networks:
+      - inc_network
+
+  # Escrow Service
+  escrow_service:
+    build:
+      context: ./services/escrow_service
+    ports:
+      - "8004:8004"
+    environment:
+      - PORT=8004
+      - USE_REAL_STRIPE=false
+    networks:
+      - inc_network
+
+  # RAG Agent Service
+  rag_agent:
+    build:
+      context: ./services/rag_agent
+    ports:
+      - "8005:8005"
+    environment:
+      - PORT=8005
+    volumes:
+      - ./config:/app/config:ro
+      - ./example_data:/app/example_data:ro
+    networks:
+      - inc_network
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: inc_logistics
+      POSTGRES_USER: inc_user
+      POSTGRES_PASSWORD: inc_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/supabase/new_tables.sql:/docker-entrypoint-initdb.d/01_new_tables.sql
+    networks:
+      - inc_network
+
+  # Redis (optional, for caching)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - inc_network
+
+volumes:
+  postgres_data:
+
+networks:
+  inc_network:
+    driver: bridge

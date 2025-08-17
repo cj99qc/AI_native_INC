@@ -1,0 +1,40 @@
+{
+  "commission_platform_delivered_pct": 15.0,
+  "commission_self_deliver_pct": 8.0,
+  "delivery_fee_base": 5.99,
+  "delivery_fee_per_km": 1.25,
+  "min_delivery_fee": 3.99,
+  "driver_payout_pct_of_delivery": 80.0,
+  "payment_fee_pct": 2.9,
+  "payment_fee_fixed": 0.30,
+  "rural_distance_threshold_km": 25.0,
+  "rural_surcharge_pct": 20.0,
+  "max_batch_size_orders": 8,
+  "batch_window_minutes": 15,
+  "max_detour_pct": 30.0,
+  "seed": 42,
+  "ottawa_center": {
+    "latitude": 45.4215,
+    "longitude": -75.6972
+  },
+  "simulation": {
+    "default_orders": 200,
+    "default_drivers": 40,
+    "order_spawn_radius_km": 15.0,
+    "driver_spawn_radius_km": 20.0,
+    "avg_order_value": 40.0,
+    "time_window_hours": 2.0
+  },
+  "routing": {
+    "tsp_2opt_iterations": 100,
+    "nearest_neighbor_start": "center",
+    "clustering_method": "kmeans",
+    "fallback_clustering": "grid"
+  },
+  "rag": {
+    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "embedding_dim": 384,
+    "top_k_results": 5,
+    "similarity_threshold": 0.7
+  }
+}
