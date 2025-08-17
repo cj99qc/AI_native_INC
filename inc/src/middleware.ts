@@ -27,6 +27,7 @@ export async function middleware(req: NextRequest) {
     pathname.startsWith('/vendor') ||
     pathname.startsWith('/driver') ||
     pathname.startsWith('/admin') ||
+    pathname.startsWith('/dashboard') ||
     pathname.startsWith('/cart') ||
     pathname.startsWith('/orders') ||
     pathname.startsWith('/checkout')
@@ -39,17 +40,22 @@ export async function middleware(req: NextRequest) {
   // Role-based route protection
   if (session && userRole) {
     // Admin routes - only admins
-    if (pathname.startsWith('/admin') && userRole !== 'admin') {
+    if ((pathname.startsWith('/admin') || pathname.startsWith('/dashboard/admin')) && userRole !== 'admin') {
       return NextResponse.redirect(new URL('/', req.url))
     }
 
     // Vendor routes - only vendors and admins
-    if (pathname.startsWith('/vendor') && !['vendor', 'admin'].includes(userRole)) {
+    if ((pathname.startsWith('/vendor') || pathname.startsWith('/dashboard/vendor')) && !['vendor', 'admin'].includes(userRole)) {
       return NextResponse.redirect(new URL('/', req.url))
     }
 
     // Driver routes - only drivers and admins  
-    if (pathname.startsWith('/driver') && !['driver', 'admin'].includes(userRole)) {
+    if ((pathname.startsWith('/driver') || pathname.startsWith('/dashboard/driver')) && !['driver', 'admin'].includes(userRole)) {
+      return NextResponse.redirect(new URL('/', req.url))
+    }
+
+    // Customer dashboard - only customers and admins
+    if (pathname.startsWith('/dashboard/customer') && !['customer', 'admin'].includes(userRole)) {
       return NextResponse.redirect(new URL('/', req.url))
     }
   }
@@ -63,16 +69,18 @@ export async function middleware(req: NextRequest) {
       return NextResponse.redirect(new URL(redirectTo, req.url))
     }
 
-    // Role-based default redirects
+    // Role-based default redirects as per requirements
     switch (userRole) {
+      case 'customer':
+        return NextResponse.redirect(new URL('/dashboard/customer', req.url))
       case 'vendor':
-        return NextResponse.redirect(new URL('/vendor/dashboard', req.url))
+        return NextResponse.redirect(new URL('/dashboard/vendor', req.url))
       case 'driver':
-        return NextResponse.redirect(new URL('/driver/dashboard', req.url))
+        return NextResponse.redirect(new URL('/dashboard/driver', req.url))
       case 'admin':
-        return NextResponse.redirect(new URL('/admin/dashboard', req.url))
+        return NextResponse.redirect(new URL('/dashboard/admin', req.url))
       default:
-        return NextResponse.redirect(new URL('/', req.url))
+        return NextResponse.redirect(new URL('/dashboard/customer', req.url))
     }
   }
 

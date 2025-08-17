@@ -35,27 +35,30 @@ export default function AuthCallbackPage() {
             return
           }
 
-          // Role-based redirects
+          // Role-based redirects as per requirements
           switch (profile?.role) {
+            case 'customer':
+              router.push('/dashboard/customer')
+              break
             case 'vendor':
               if (!profile.onboarding_completed) {
                 router.push('/vendor/onboarding')
               } else {
-                router.push('/vendor/dashboard')
+                router.push('/dashboard/vendor')
               }
               break
             case 'driver':
               if (profile.kyc_status === 'pending' || !profile.kyc_status) {
                 router.push('/driver/kyc')
               } else {
-                router.push('/driver/dashboard')
+                router.push('/dashboard/driver')
               }
               break
             case 'admin':
-              router.push('/admin/dashboard')
+              router.push('/dashboard/admin')
               break
             default:
-              router.push('/')
+              router.push('/dashboard/customer')
           }
         } else {
           router.push('/(auth)/login')
