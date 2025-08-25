@@ -1,7 +1,5 @@
 # CREATE FILE: docker-compose.yml
 
-version: '3.8'
-
 services:
   # Next.js application
   nextjs:
