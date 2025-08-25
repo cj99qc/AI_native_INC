@@ -32,7 +32,7 @@ export async function middleware(req: NextRequest) {
     pathname.startsWith('/orders') ||
     pathname.startsWith('/checkout')
   )) {
-    const redirectUrl = new URL('/(auth)/login', req.url)
+    const redirectUrl = new URL('/login', req.url)
     redirectUrl.searchParams.set('redirect', pathname)
     return NextResponse.redirect(redirectUrl)
   }
@@ -61,7 +61,7 @@ export async function middleware(req: NextRequest) {
   }
 
   // Redirect authenticated users away from auth pages
-  if (session && (pathname.startsWith('/(auth)/login') || pathname.startsWith('/(auth)/signup'))) {
+  if (session && (pathname.startsWith('/login') || pathname.startsWith('/signup'))) {
     // Get redirect parameter if exists
     const redirectTo = req.nextUrl.searchParams.get('redirect')
     
