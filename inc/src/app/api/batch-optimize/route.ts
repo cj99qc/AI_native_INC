@@ -114,16 +114,24 @@ export async function POST(req: NextRequest) {
           const routingResult = await response.json()
           
           // Transform routing service response to match expected format
-          const pickupStops = routingResult.stops.filter((s: any) => s.stop_type === 'pickup')
+          interface RouteStop {
+            stop_type: string
+            sequence: number
+            order_id: string
+            lat: number
+            lng: number
+          }
+
+          const pickupStops = (routingResult.stops as RouteStop[]).filter(s => s.stop_type === 'pickup')
           const optimizedOrderIds = pickupStops
-            .sort((a: any, b: any) => a.sequence - b.sequence)
-            .map((s: any) => s.order_id)
+            .sort((a, b) => a.sequence - b.sequence)
+            .map(s => s.order_id)
 
           optimizationResult = {
             optimized_order: optimizedOrderIds,
             estimated_duration_minutes: routingResult.estimated_duration_minutes,
             estimated_distance_km: routingResult.total_distance_km,
-            route_waypoints: routingResult.stops.map((s: any) => ({
+            route_waypoints: (routingResult.stops as RouteStop[]).map(s => ({
               lat: s.lat,
               lng: s.lng
             })),
@@ -141,7 +149,7 @@ export async function POST(req: NextRequest) {
         throw new Error('New routing service disabled')
       }
     } catch (error) {
-      console.log('Falling back to OpenAI optimization:', error.message)
+      console.log('Falling back to OpenAI optimization:', error instanceof Error ? error.message : String(error))
       
       // Fallback to OpenAI optimization
       const openai = getOpenAI()

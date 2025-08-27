@@ -8,11 +8,11 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Separator } from '@/components/ui/separator'
-import { User, Store, Truck, Mail, Lock, Loader2, Chrome, Apple } from 'lucide-react'
+import { User, Store, Truck, Mail, Lock, Loader2, Chrome, Apple, Shield, CheckCircle } from 'lucide-react'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
 
-type UserRole = 'customer' | 'vendor' | 'driver'
+type UserRole = 'customer' | 'vendor' | 'driver' | 'admin'
 
 export default function SignupPage() {
   const supabase = useSupabase()
@@ -24,6 +24,9 @@ export default function SignupPage() {
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
   const [selectedRole, setSelectedRole] = useState<UserRole>('customer')
+  const [selectedRoles, setSelectedRoles] = useState<UserRole[]>(['customer']) // Support multiple roles
+  const [allowMultipleRoles, setAllowMultipleRoles] = useState(false)
+  const [isDevMode, setIsDevMode] = useState(false) // For skipping email confirmation
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -45,24 +48,35 @@ export default function SignupPage() {
       title: 'Driver',
       description: 'Earn by delivering orders in your area',
       color: 'bg-purple-500'
+    },
+    admin: {
+      icon: Shield,
+      title: 'Admin',
+      description: 'Manage platform and users',
+      color: 'bg-red-500'
     }
   }
 
   async function handleSuccess(userId: string) {
-    // Create profile with selected role
+    // Create profile with selected role(s)
+    const primaryRole = allowMultipleRoles ? selectedRoles[0] : selectedRole
     const { error: profileError } = await supabase
       .from('profiles')
       .insert({
         id: userId,
         name,
-        role: selectedRole,
-        onboarding_completed: selectedRole === 'customer',
-        kyc_status: selectedRole === 'driver' ? 'pending' : null
+        role: primaryRole,
+        onboarding_completed: primaryRole === 'customer',
+        kyc_status: primaryRole === 'driver' ? 'pending' : null
       })
 
     if (profileError) {
       console.error('Error creating profile:', profileError)
     }
+
+    // For multiple roles, we could extend the schema to support a roles array or 
+    // create additional profile entries. For now, we'll use the primary role.
+    // In a production system, you'd want to extend the database schema.
 
     // Role-based redirects
     if (redirectTo) {
@@ -70,12 +84,15 @@ export default function SignupPage() {
       return
     }
 
-    switch (selectedRole) {
+    switch (primaryRole) {
       case 'vendor':
         router.push('/vendor/onboarding')
         break
       case 'driver':
         router.push('/driver/kyc')
+        break
+      case 'admin':
+        router.push('/dashboard/admin')
         break
       default:
         router.push('/')
@@ -88,28 +105,54 @@ export default function SignupPage() {
       return
     }
 
+    // Validate role selection
+    if (allowMultipleRoles && selectedRoles.length === 0) {
+      setError('Please select at least one role')
+      return
+    }
+
     setIsLoading(true)
     setError('')
 
     try {
-      const { data, error: authError } = await supabase.auth.signUp({
+      const primaryRole = allowMultipleRoles ? selectedRoles[0] : selectedRole
+      
+      // In development mode, we'll try to sign up without email confirmation requirement
+      const signUpOptions = {
         email,
         password,
         options: {
           data: {
             name,
-            role: selectedRole
+            role: primaryRole,
+            roles: allowMultipleRoles ? selectedRoles : [primaryRole] // Store all selected roles
           },
-          emailRedirectTo: `${window.location.origin}/auth/callback${redirectTo ? `?redirect=${redirectTo}` : ''}`
+          ...(isDevMode ? {} : {
+            emailRedirectTo: `${window.location.origin}/auth/callback${redirectTo ? `?redirect=${redirectTo}` : ''}`
+          })
         }
-      })
+      }
+
+      const { data, error: authError } = await supabase.auth.signUp(signUpOptions)
 
       if (authError) {
         setError(authError.message)
-      } else if (data.user && !data.session) {
+      } else if (data.user && !data.session && !isDevMode) {
         setError('Please check your email to confirm your account before signing in.')
-      } else if (data.user && data.session) {
+      } else if (data.user && (data.session || isDevMode)) {
         await handleSuccess(data.user.id)
+      } else if (data.user && !data.session && isDevMode) {
+        // In dev mode, if no session but user exists, try to sign them in
+        const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+          email,
+          password
+        })
+        
+        if (signInError) {
+          setError('Account created but sign-in failed. Please try logging in manually.')
+        } else if (signInData.session) {
+          await handleSuccess(signInData.user.id)
+        }
       }
     } catch {
       setError('An unexpected error occurred')
@@ -172,37 +215,132 @@ export default function SignupPage() {
           <CardContent className="space-y-6">
             {/* Role Selection */}
             <div className="space-y-3">
-              <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                Select your role
-              </label>
-              <Tabs value={selectedRole} onValueChange={(value) => setSelectedRole(value as UserRole)}>
-                <TabsList className="grid w-full grid-cols-3">
-                  {Object.entries(roleConfig).map(([role, config]) => (
-                    <TabsTrigger key={role} value={role} className="text-xs">
-                      <config.icon className="h-3 w-3 mr-1" />
-                      {config.title}
-                    </TabsTrigger>
-                  ))}
-                </TabsList>
-                
-                {Object.entries(roleConfig).map(([role, config]) => (
-                  <TabsContent key={role} value={role} className="mt-3">
-                    <div className="p-3 rounded-lg bg-gray-50 dark:bg-gray-800 border">
-                      <div className="flex items-center gap-3 mb-2">
-                        <div className={`p-2 rounded-full ${config.color}`}>
-                          <config.icon className="h-4 w-4 text-white" />
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  Select your role(s)
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setAllowMultipleRoles(!allowMultipleRoles)}
+                  className="text-xs text-blue-600 hover:text-blue-700 flex items-center gap-1"
+                >
+                  {allowMultipleRoles ? (
+                    <>
+                      <CheckCircle className="h-3 w-3" />
+                      Multiple roles
+                    </>
+                  ) : (
+                    'Enable multiple roles'
+                  )}
+                </button>
+              </div>
+
+              {allowMultipleRoles ? (
+                // Multiple role selection with checkboxes
+                <div className="grid grid-cols-2 gap-2">
+                  {Object.entries(roleConfig).map(([role, config]) => {
+                    const isSelected = selectedRoles.includes(role as UserRole)
+                    return (
+                      <button
+                        key={role}
+                        type="button"
+                        onClick={() => {
+                          if (isSelected) {
+                            setSelectedRoles(prev => prev.filter(r => r !== role))
+                          } else {
+                            setSelectedRoles(prev => [...prev, role as UserRole])
+                          }
+                        }}
+                        className={`p-2 rounded-lg border text-left transition-all ${
+                          isSelected
+                            ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                            : 'border-gray-200 dark:border-gray-700 hover:border-blue-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          <div className={`p-1 rounded-full ${config.color}`}>
+                            <config.icon className="h-3 w-3 text-white" />
+                          </div>
+                          <span className="text-xs font-medium">{config.title}</span>
+                          {isSelected && <CheckCircle className="h-3 w-3 text-blue-600 ml-auto" />}
                         </div>
-                        <h3 className="font-medium text-gray-900 dark:text-white">
+                        <p className="text-xs text-gray-600 dark:text-gray-400">
+                          {config.description}
+                        </p>
+                      </button>
+                    )
+                  })}
+                </div>
+              ) : (
+                // Single role selection with tabs
+                <Tabs value={selectedRole} onValueChange={(value) => setSelectedRole(value as UserRole)}>
+                  <TabsList className="grid w-full grid-cols-2">
+                    {Object.entries(roleConfig).slice(0, 4).map(([role, config]) => (
+                      <TabsTrigger key={role} value={role} className="text-xs">
+                        <config.icon className="h-3 w-3 mr-1" />
+                        {config.title}
+                      </TabsTrigger>
+                    ))}
+                  </TabsList>
+                  
+                  {/* Show additional roles in a second row if needed */}
+                  {Object.keys(roleConfig).length > 4 && (
+                    <TabsList className="grid w-full grid-cols-2 mt-2">
+                      {Object.entries(roleConfig).slice(4).map(([role, config]) => (
+                        <TabsTrigger key={role} value={role} className="text-xs">
+                          <config.icon className="h-3 w-3 mr-1" />
                           {config.title}
-                        </h3>
+                        </TabsTrigger>
+                      ))}
+                    </TabsList>
+                  )}
+                  
+                  {Object.entries(roleConfig).map(([role, config]) => (
+                    <TabsContent key={role} value={role} className="mt-3">
+                      <div className="p-3 rounded-lg bg-gray-50 dark:bg-gray-800 border">
+                        <div className="flex items-center gap-3 mb-2">
+                          <div className={`p-2 rounded-full ${config.color}`}>
+                            <config.icon className="h-4 w-4 text-white" />
+                          </div>
+                          <h3 className="font-medium text-gray-900 dark:text-white">
+                            {config.title}
+                          </h3>
+                        </div>
+                        <p className="text-sm text-gray-600 dark:text-gray-400">
+                          {config.description}
+                        </p>
                       </div>
-                      <p className="text-sm text-gray-600 dark:text-gray-400">
-                        {config.description}
-                      </p>
-                    </div>
-                  </TabsContent>
-                ))}
-              </Tabs>
+                    </TabsContent>
+                  ))}
+                </Tabs>
+              )}
+            </div>
+
+            {/* Development Mode Toggle */}
+            <div className="flex items-center justify-between p-3 rounded-lg bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800">
+              <div>
+                <label className="text-sm font-medium text-yellow-800 dark:text-yellow-200">
+                  Development Mode
+                </label>
+                <p className="text-xs text-yellow-600 dark:text-yellow-400">
+                  Skip email confirmation for testing
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsDevMode(!isDevMode)}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  isDevMode
+                    ? 'bg-blue-600'
+                    : 'bg-gray-200 dark:bg-gray-700'
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    isDevMode ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
             </div>
 
             {/* Social Auth */}
@@ -321,7 +459,7 @@ export default function SignupPage() {
               </Link>
             </div>
 
-            {selectedRole !== 'customer' && (
+            {((allowMultipleRoles && selectedRoles.some(role => role !== 'customer')) || (!allowMultipleRoles && selectedRole !== 'customer')) && (
               <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
@@ -330,15 +468,41 @@ export default function SignupPage() {
                 <div className="flex items-start gap-2">
                   <div className="h-2 w-2 rounded-full bg-yellow-500 mt-1.5 flex-shrink-0" />
                   <div className="text-xs text-yellow-700 dark:text-yellow-300">
-                    <p className="font-medium mb-1">
-                      {selectedRole === 'vendor' ? 'Business Verification Required' : 'Driver Verification Required'}
-                    </p>
-                    <p>
-                      {selectedRole === 'vendor' 
-                        ? 'You will need to complete business verification and setup before listing products.'
-                        : 'You will need to complete identity verification and background checks before accepting deliveries.'
+                    {(() => {
+                      const currentRoles = allowMultipleRoles ? selectedRoles : [selectedRole]
+                      const hasVendor = currentRoles.includes('vendor')
+                      const hasDriver = currentRoles.includes('driver')
+                      const hasAdmin = currentRoles.includes('admin')
+                      
+                      let title = 'Additional Requirements'
+                      let message = ''
+                      
+                      if (hasAdmin && hasVendor && hasDriver) {
+                        message = 'You will need to complete admin setup, business verification, and driver verification.'
+                      } else if (hasAdmin && hasVendor) {
+                        message = 'You will need to complete admin setup and business verification.'
+                      } else if (hasAdmin && hasDriver) {
+                        message = 'You will need to complete admin setup and driver verification.'
+                      } else if (hasVendor && hasDriver) {
+                        message = 'You will need to complete business and driver verification.'
+                      } else if (hasAdmin) {
+                        title = 'Admin Access'
+                        message = 'You will have full platform administration privileges.'
+                      } else if (hasVendor) {
+                        title = 'Business Verification Required'
+                        message = 'You will need to complete business verification and setup before listing products.'
+                      } else if (hasDriver) {
+                        title = 'Driver Verification Required'
+                        message = 'You will need to complete identity verification and background checks before accepting deliveries.'
                       }
-                    </p>
+                      
+                      return (
+                        <>
+                          <p className="font-medium mb-1">{title}</p>
+                          <p>{message}</p>
+                        </>
+                      )
+                    })()}
                   </div>
                 </div>
               </motion.div>
