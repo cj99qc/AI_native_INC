@@ -47,6 +47,7 @@ export default function Navbar() {
     if (user) {
       if (isCustomer || isAdmin) {
         links.push(
+          { href: '/dashboard/customer', label: 'Shop' },
           { href: '/cart', label: 'Cart' },
           { href: '/orders', label: 'Orders' }
         )
@@ -164,17 +165,13 @@ export default function Navbar() {
                     Profile & Settings
                   </Link>
                 </DropdownMenuItem>
-                {user.role !== 'customer' && (
-                  <>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem asChild>
-                      <Link href={`/dashboard/${user.role}`}>
-                        <Package className="mr-2 h-4 w-4" />
-                        {user.role === 'vendor' ? 'Business' : user.role === 'driver' ? 'Driver' : user.role === 'admin' ? 'Admin' : 'Customer'} Dashboard
-                      </Link>
-                    </DropdownMenuItem>
-                  </>
-                )}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem asChild>
+                  <Link href={`/dashboard/${user.role}`}>
+                    <Package className="mr-2 h-4 w-4" />
+                    {user.role === 'customer' ? 'Shopping' : user.role === 'vendor' ? 'Business' : user.role === 'driver' ? 'Driver' : user.role === 'admin' ? 'Admin' : 'Dashboard'} Dashboard
+                  </Link>
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={signOut}>
                   <LogOut className="mr-2 h-4 w-4" />
