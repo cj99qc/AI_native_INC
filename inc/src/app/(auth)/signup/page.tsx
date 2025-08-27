@@ -231,7 +231,7 @@ export default function SignupPage() {
 
               {allowMultipleRoles ? (
                 // Multiple role selection with checkboxes
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-3 gap-2">
                   {Object.entries(roleConfig).map(([role, config]) => {
                     const isSelected = selectedRoles.includes(role as UserRole)
                     return (
@@ -268,7 +268,7 @@ export default function SignupPage() {
               ) : (
                 // Single role selection with tabs
                 <Tabs value={selectedRole} onValueChange={(value) => setSelectedRole(value as UserRole)}>
-                  <TabsList className="grid w-full grid-cols-2">
+                  <TabsList className="grid w-full grid-cols-3">
                     {Object.entries(roleConfig).slice(0, 4).map(([role, config]) => (
                       <TabsTrigger key={role} value={role} className="text-xs">
                         <config.icon className="h-3 w-3 mr-1" />
