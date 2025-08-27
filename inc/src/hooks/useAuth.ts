@@ -30,60 +30,108 @@ export function useAuth() {
 
     async function getProfile(userId: string) {
       try {
-        const { data: profile } = await supabase
+        console.log(`[useAuth] Fetching profile for user: ${userId}`)
+        const { data: profile, error } = await supabase
           .from('profiles')
           .select('*')
           .eq('id', userId)
           .single()
+        
+        if (error) {
+          console.error('[useAuth] Profile fetch error:', error)
+          return null
+        }
+        
+        console.log(`[useAuth] Profile fetched:`, profile)
         return profile
       } catch (error) {
-        console.error('Error fetching profile:', error)
+        console.error('[useAuth] Error fetching profile:', error)
         return null
       }
     }
 
     async function updateUser() {
       try {
-        const { data: authData } = await supabase.auth.getUser()
+        console.log('[useAuth] Checking current user...')
+        const { data: authData, error } = await supabase.auth.getUser()
+        
+        if (error) {
+          console.error('[useAuth] Auth error:', error)
+          if (mounted) {
+            setUser(null)
+            setLoading(false)
+          }
+          return
+        }
         
         if (authData.user && mounted) {
+          console.log(`[useAuth] User found: ${authData.user.email}`)
           const profile = await getProfile(authData.user.id)
-          setUser({
+          const userData: AuthUser = {
             id: authData.user.id,
             email: authData.user.email || '',
             role: (profile?.role as UserRole) || 'customer',
             profile: profile || undefined
-          })
+          }
+          console.log(`[useAuth] Setting user data:`, userData)
+          setUser(userData)
         } else if (mounted) {
+          console.log('[useAuth] No user found')
           setUser(null)
         }
       } catch (error) {
-        console.error('Auth error:', error)
+        console.error('[useAuth] Auth error:', error)
         if (mounted) setUser(null)
       } finally {
-        if (mounted) setLoading(false)
+        if (mounted) {
+          console.log('[useAuth] Setting loading to false')
+          setLoading(false)
+        }
       }
     }
 
     updateUser()
 
     const { data: subscription } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log(`[useAuth] Auth state change: ${event}`, session?.user?.email || 'no user')
+      
       if (event === 'SIGNED_IN' && session?.user) {
         const profile = await getProfile(session.user.id)
         if (mounted) {
-          setUser({
+          const userData: AuthUser = {
             id: session.user.id,
             email: session.user.email || '',
             role: (profile?.role as UserRole) || 'customer',
             profile: profile || undefined
-          })
+          }
+          console.log(`[useAuth] User signed in:`, userData)
+          setUser(userData)
+          setLoading(false)
         }
       } else if (event === 'SIGNED_OUT') {
-        if (mounted) setUser(null)
+        console.log('[useAuth] User signed out')
+        if (mounted) {
+          setUser(null)
+          setLoading(false)
+        }
+      } else if (event === 'TOKEN_REFRESHED') {
+        console.log('[useAuth] Token refreshed')
+        // Update user data in case profile changed
+        if (session?.user && mounted) {
+          const profile = await getProfile(session.user.id)
+          const userData: AuthUser = {
+            id: session.user.id,
+            email: session.user.email || '',
+            role: (profile?.role as UserRole) || 'customer',
+            profile: profile || undefined
+          }
+          setUser(userData)
+        }
       }
     })
 
     return () => {
+      console.log('[useAuth] Cleaning up subscription')
       mounted = false
       subscription.subscription.unsubscribe()
     }
