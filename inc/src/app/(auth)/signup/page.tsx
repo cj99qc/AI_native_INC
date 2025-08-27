@@ -274,26 +274,14 @@ export default function SignupPage() {
               ) : (
                 // Single role selection with tabs
                 <Tabs value={selectedRole} onValueChange={(value) => setSelectedRole(value as UserRole)}>
-                  <TabsList className="grid w-full grid-cols-2">
-                    {Object.entries(roleConfig).slice(0, 4).map(([role, config]) => (
+                  <TabsList className="grid w-full grid-cols-4">
+                    {Object.entries(roleConfig).map(([role, config]) => (
                       <TabsTrigger key={role} value={role} className="text-xs">
                         <config.icon className="h-3 w-3 mr-1" />
                         {config.title}
                       </TabsTrigger>
                     ))}
                   </TabsList>
-                  
-                  {/* Show additional roles in a second row if needed */}
-                  {Object.keys(roleConfig).length > 4 && (
-                    <TabsList className="grid w-full grid-cols-2 mt-2">
-                      {Object.entries(roleConfig).slice(4).map(([role, config]) => (
-                        <TabsTrigger key={role} value={role} className="text-xs">
-                          <config.icon className="h-3 w-3 mr-1" />
-                          {config.title}
-                        </TabsTrigger>
-                      ))}
-                    </TabsList>
-                  )}
                   
                   {Object.entries(roleConfig).map(([role, config]) => (
                     <TabsContent key={role} value={role} className="mt-3">
