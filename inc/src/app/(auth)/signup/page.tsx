@@ -8,11 +8,11 @@ import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Separator } from '@/components/ui/separator'
-import { User, Store, Truck, Mail, Lock, Loader2, Chrome, Apple, Shield, CheckCircle } from 'lucide-react'
+import { User, Store, Truck, Mail, Lock, Loader2, Chrome, Apple, CheckCircle } from 'lucide-react'
 import Link from 'next/link'
 import { motion } from 'framer-motion'
 
-type UserRole = 'customer' | 'vendor' | 'driver' | 'admin'
+type UserRole = 'customer' | 'vendor' | 'driver'
 
 export default function SignupPage() {
   const supabase = useSupabase()
@@ -48,13 +48,8 @@ export default function SignupPage() {
       title: 'Driver',
       description: 'Earn by delivering orders in your area',
       color: 'bg-purple-500'
-    },
-    admin: {
-      icon: Shield,
-      title: 'Admin',
-      description: 'Manage platform and users',
-      color: 'bg-red-500'
     }
+    // Admin role removed from public signup - see ADMIN_SETUP.md for manual admin setup
   }
 
   async function handleSuccess(userId: string) {
@@ -90,9 +85,6 @@ export default function SignupPage() {
         break
       case 'driver':
         router.push('/driver/kyc')
-        break
-      case 'admin':
-        router.push('/dashboard/admin')
         break
       default:
         router.push('/')
@@ -153,6 +145,8 @@ export default function SignupPage() {
         } else if (signInData.session) {
           await handleSuccess(signInData.user.id)
         }
+      } else if (!data.user) {
+        setError('Failed to create account. Please try again.')
       }
     } catch {
       setError('An unexpected error occurred')
@@ -472,28 +466,21 @@ export default function SignupPage() {
                       const currentRoles = allowMultipleRoles ? selectedRoles : [selectedRole]
                       const hasVendor = currentRoles.includes('vendor')
                       const hasDriver = currentRoles.includes('driver')
-                      const hasAdmin = currentRoles.includes('admin')
                       
                       let title = 'Additional Requirements'
                       let message = ''
                       
-                      if (hasAdmin && hasVendor && hasDriver) {
-                        message = 'You will need to complete admin setup, business verification, and driver verification.'
-                      } else if (hasAdmin && hasVendor) {
-                        message = 'You will need to complete admin setup and business verification.'
-                      } else if (hasAdmin && hasDriver) {
-                        message = 'You will need to complete admin setup and driver verification.'
-                      } else if (hasVendor && hasDriver) {
+                      if (hasVendor && hasDriver) {
                         message = 'You will need to complete business and driver verification.'
-                      } else if (hasAdmin) {
-                        title = 'Admin Access'
-                        message = 'You will have full platform administration privileges.'
                       } else if (hasVendor) {
                         title = 'Business Verification Required'
                         message = 'You will need to complete business verification and setup before listing products.'
                       } else if (hasDriver) {
                         title = 'Driver Verification Required'
                         message = 'You will need to complete identity verification and background checks before accepting deliveries.'
+                      } else {
+                        title = 'Welcome!'
+                        message = 'You can start using the platform immediately.'
                       }
                       
                       return (
