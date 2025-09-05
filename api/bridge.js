@@ -12,6 +12,10 @@ const PORT = process.env.BRIDGE_PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+// Agent orchestration
+const agentController = require('./agents/agent_controller');
+app.use('/api/agent', agentController);
+
 // Service URLs (can be overridden by environment variables)
 const SERVICES = {
   pricing: process.env.PRICING_SERVICE_URL || 'http://localhost:8001',
