@@ -8,11 +8,13 @@ This script tests the full workflow:
 """
 
 import sys
+import os
 import json
 from datetime import datetime, timedelta
 
-# Add parent directory to path
-sys.path.insert(0, '/home/runner/work/AI_native_INC/AI_native_INC')
+# Add project root to path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__)))
+sys.path.insert(0, project_root)
 
 from services.routing_service.batching import BatchingEngine, Order
 from services.matching_service.app import MatchingEngine, Driver, DriverStatus, BatchData

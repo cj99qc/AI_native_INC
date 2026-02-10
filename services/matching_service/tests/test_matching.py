@@ -10,6 +10,10 @@ from services.matching_service.app import (
 class TestTrajectoryMatching:
     """Test trajectory-based driver matching"""
     
+    # Test thresholds
+    HIGH_TRAJECTORY_THRESHOLD = 0.6  # Minimum score considered "moving toward"
+    LOW_TRAJECTORY_THRESHOLD = 0.4   # Maximum score considered "moving away"
+    
     @pytest.fixture
     def config(self):
         return {"seed": 42}
@@ -61,7 +65,8 @@ class TestTrajectoryMatching:
         score = matching_engine.calculate_trajectory_score(driver, pickup_lat, pickup_lng)
         
         # Should have a high score (moving toward pickup)
-        assert score > 0.6, f"Expected high trajectory score but got {score}"
+        # Using threshold: drivers moving toward pickup should score > 0.6
+        assert score > self.HIGH_TRAJECTORY_THRESHOLD, f"Expected high trajectory score but got {score}"
     
     def test_trajectory_score_moving_away(self, matching_engine):
         """Test trajectory score when driver is moving away from pickup"""
@@ -88,7 +93,8 @@ class TestTrajectoryMatching:
         score = matching_engine.calculate_trajectory_score(driver, pickup_lat, pickup_lng)
         
         # Should have a low score (moving away from pickup)
-        assert score < 0.4, f"Expected low trajectory score but got {score}"
+        # Using threshold: drivers moving away from pickup should score < 0.4
+        assert score < self.LOW_TRAJECTORY_THRESHOLD, f"Expected low trajectory score but got {score}"
     
     def test_trajectory_score_no_previous_location(self, matching_engine):
         """Test trajectory score when no previous location available"""

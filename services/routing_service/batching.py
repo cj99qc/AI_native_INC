@@ -137,7 +137,7 @@ class BatchingEngine:
         
         return list(grid_clusters.values())
     
-    def get_highway_artery_point(self) -> Optional[Tuple[float, float]]:
+    def get_highway_reference_point(self) -> Optional[Tuple[float, float]]:
         """Get a reference point on Highway 7 for distance calculations"""
         # Return a central point on Highway 7 (Ottawa area)
         # This is a simplified approximation - latitude ~45.38, longitude ~-75.70
@@ -149,7 +149,7 @@ class BatchingEngine:
         Filter orders that are too far from Highway 7 artery
         Limits 'off-highway' deviation to specified km (default 5km)
         """
-        highway_point = self.get_highway_artery_point()
+        highway_point = self.get_highway_reference_point()
         if not highway_point:
             return orders  # No filtering if highway reference unavailable
         
@@ -182,7 +182,7 @@ class BatchingEngine:
             return True
         
         center_lat, center_lng = self.calculate_cluster_center(cluster)
-        highway_point = self.get_highway_artery_point()
+        highway_point = self.get_highway_reference_point()
         
         if not highway_point:
             return True  # Accept if no highway reference available
@@ -277,6 +277,11 @@ class BatchingEngine:
         if not highway_filtered_orders:
             # If no orders near highway, fall back to original orders
             # This prevents complete failure in areas far from Highway 7
+            import logging
+            logging.warning(
+                f"No orders within {max_highway_deviation_km}km of Highway 7. "
+                f"Falling back to unfiltered orders ({len(eligible_orders)} orders)."
+            )
             highway_filtered_orders = eligible_orders
         
         # Sort by priority and creation time
@@ -300,6 +305,11 @@ class BatchingEngine:
         
         # If all clusters were filtered out, use original clusters
         if not valid_clusters:
+            import logging
+            logging.warning(
+                f"All {len(clusters)} clusters exceed {max_highway_deviation_km}km highway deviation. "
+                f"Using unfiltered clusters to prevent empty batch result."
+            )
             valid_clusters = clusters
         
         # Balance batch sizes

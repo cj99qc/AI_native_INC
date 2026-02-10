@@ -106,8 +106,14 @@ class AcceptanceResponse(BaseModel):
 class MatchingEngine:
     """Driver matching engine with scoring and acceptance prediction"""
     
+    # Constants for trajectory and movement detection
+    MOVEMENT_EPSILON = 0.0001  # Threshold for detecting stationary drivers (degrees)
+    TRAJECTORY_NEUTRAL_SCORE = 0.5  # Score when no trajectory data available
+    ARTERY_FALLBACK_SCORE = 0.5  # Score when PostGIS unavailable
+    
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        self._highway_geometry_cache = None  # Cache for Highway 7 geometry
     
     def haversine_distance(self, lat1: float, lng1: float, lat2: float, lng2: float) -> float:
         """Calculate haversine distance between two points in kilometers"""
@@ -159,7 +165,7 @@ class MatchingEngine:
         """Score based on driver rating (5.0 is perfect)"""
         return rating / 5.0
     
-    def get_artery_line_locate_point(self, lat: float, lng: float) -> Optional[float]:
+    def get_artery_position_fraction(self, lat: float, lng: float) -> Optional[float]:
         """
         Calculate position on Highway 7 artery using PostGIS ST_LineLocatePoint
         Returns a fraction (0.0 to 1.0) representing position along the artery
@@ -196,12 +202,12 @@ class MatchingEngine:
         Calculate score based on proximity to Highway 7 artery
         Higher score if both driver and pickup are near the artery
         """
-        driver_fraction = self.get_artery_line_locate_point(driver_lat, driver_lng)
-        pickup_fraction = self.get_artery_line_locate_point(pickup_lat, pickup_lng)
+        driver_fraction = self.get_artery_position_fraction(driver_lat, driver_lng)
+        pickup_fraction = self.get_artery_position_fraction(pickup_lat, pickup_lng)
         
         if driver_fraction is None or pickup_fraction is None:
             # Fallback to neutral score if PostGIS unavailable
-            return 0.5
+            return self.ARTERY_FALLBACK_SCORE
         
         # Score based on how close driver and pickup are along the artery
         # Closer positions = higher score
@@ -224,7 +230,7 @@ class MatchingEngine:
         """
         if not driver.previous_location:
             # No trajectory data available
-            return 0.5  # Neutral score
+            return self.TRAJECTORY_NEUTRAL_SCORE
         
         # Calculate vector from previous to current location (driver's movement)
         prev_lat = driver.previous_location.lat
@@ -246,9 +252,9 @@ class MatchingEngine:
         movement_magnitude = math.sqrt(movement_lat**2 + movement_lng**2)
         to_pickup_magnitude = math.sqrt(to_pickup_lat**2 + to_pickup_lng**2)
         
-        if movement_magnitude < 0.0001 or to_pickup_magnitude < 0.0001:
+        if movement_magnitude < self.MOVEMENT_EPSILON or to_pickup_magnitude < self.MOVEMENT_EPSILON:
             # Driver is stationary or at pickup location
-            return 0.5
+            return self.TRAJECTORY_NEUTRAL_SCORE
         
         # Cosine similarity: -1 (opposite) to 1 (same direction)
         cosine_sim = dot_product / (movement_magnitude * to_pickup_magnitude)

@@ -45,9 +45,9 @@ class TestHighwayDeviationFiltering:
         """Mix of on-highway and off-highway orders"""
         return highway_orders + off_highway_orders
     
-    def test_get_highway_artery_point(self, batching_engine):
+    def test_get_highway_reference_point(self, batching_engine):
         """Test getting Highway 7 reference point"""
-        point = batching_engine.get_highway_artery_point()
+        point = batching_engine.get_highway_reference_point()
         
         assert point is not None
         assert len(point) == 2
@@ -166,7 +166,7 @@ class TestHighwayDeviationFiltering:
     def test_haversine_distance_calculation(self, batching_engine):
         """Test haversine distance calculation accuracy"""
         # Distance from highway point to nearby location
-        highway_point = batching_engine.get_highway_artery_point()
+        highway_point = batching_engine.get_highway_reference_point()
         lat, lng = highway_point
         
         # Point 5km away (roughly)
