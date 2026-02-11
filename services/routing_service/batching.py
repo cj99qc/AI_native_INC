@@ -137,6 +137,61 @@ class BatchingEngine:
         
         return list(grid_clusters.values())
     
+    def get_highway_reference_point(self) -> Optional[Tuple[float, float]]:
+        """Get a reference point on Highway 7 for distance calculations"""
+        # Return a central point on Highway 7 (Ottawa area)
+        # This is a simplified approximation - latitude ~45.38, longitude ~-75.70
+        return (45.38, -75.70)
+    
+    def filter_orders_by_highway_deviation(self, orders: List[Order], 
+                                          max_deviation_km: float = 5.0) -> List[Order]:
+        """
+        Filter orders that are too far from Highway 7 artery
+        Limits 'off-highway' deviation to specified km (default 5km)
+        """
+        highway_point = self.get_highway_reference_point()
+        if not highway_point:
+            return orders  # No filtering if highway reference unavailable
+        
+        filtered_orders = []
+        highway_lat, highway_lng = highway_point
+        
+        for order in orders:
+            # Check both pickup and delivery distances from highway
+            pickup_distance = self.haversine_distance(
+                order.pickup_lat, order.pickup_lng, highway_lat, highway_lng
+            )
+            delivery_distance = self.haversine_distance(
+                order.delivery_lat, order.delivery_lng, highway_lat, highway_lng
+            )
+            
+            # Include order if either pickup or delivery is within deviation limit
+            # This ensures we capture orders serviced via the highway
+            if pickup_distance <= max_deviation_km or delivery_distance <= max_deviation_km:
+                filtered_orders.append(order)
+        
+        return filtered_orders
+    
+    def validate_cluster_highway_deviation(self, cluster: List[Order], 
+                                          max_deviation_km: float = 5.0) -> bool:
+        """
+        Validate that a cluster's centroid doesn't deviate too far from Highway 7
+        Returns True if cluster is acceptable, False otherwise
+        """
+        if not cluster:
+            return True
+        
+        center_lat, center_lng = self.calculate_cluster_center(cluster)
+        highway_point = self.get_highway_reference_point()
+        
+        if not highway_point:
+            return True  # Accept if no highway reference available
+        
+        highway_lat, highway_lng = highway_point
+        distance = self.haversine_distance(center_lat, center_lng, highway_lat, highway_lng)
+        
+        return distance <= max_deviation_km
+    
     def balance_batches(self, clusters: List[List[Order]]) -> List[List[Order]]:
         """Balance cluster sizes to respect max batch size"""
         balanced_batches = []
@@ -198,8 +253,12 @@ class BatchingEngine:
         ]
     
     def create_batches(self, orders: List[Order], 
-                      current_time: Optional[datetime] = None) -> List[Batch]:
-        """Main method to create batches from a list of orders"""
+                      current_time: Optional[datetime] = None,
+                      max_highway_deviation_km: float = 5.0) -> List[Batch]:
+        """
+        Main method to create batches from a list of orders
+        Now includes highway deviation filtering to limit off-highway orders
+        """
         if not orders:
             return []
         
@@ -209,21 +268,52 @@ class BatchingEngine:
         if not eligible_orders:
             return []
         
+        # NEW: Filter orders by highway deviation (Pulse constraint)
+        # Only include orders within 5km of Highway 7
+        highway_filtered_orders = self.filter_orders_by_highway_deviation(
+            eligible_orders, max_highway_deviation_km
+        )
+        
+        if not highway_filtered_orders:
+            # If no orders near highway, fall back to original orders
+            # This prevents complete failure in areas far from Highway 7
+            import logging
+            logging.warning(
+                f"No orders within {max_highway_deviation_km}km of Highway 7. "
+                f"Falling back to unfiltered orders ({len(eligible_orders)} orders)."
+            )
+            highway_filtered_orders = eligible_orders
+        
         # Sort by priority and creation time
-        eligible_orders.sort(key=lambda x: (-x.priority, x.created_at))
+        highway_filtered_orders.sort(key=lambda x: (-x.priority, x.created_at))
         
         # Determine number of clusters
-        if len(eligible_orders) <= self.max_batch_size:
+        if len(highway_filtered_orders) <= self.max_batch_size:
             n_clusters = 1
         else:
             # Aim for batches of roughly max_batch_size/2 to max_batch_size
-            n_clusters = max(1, len(eligible_orders) // (self.max_batch_size // 2))
+            n_clusters = max(1, len(highway_filtered_orders) // (self.max_batch_size // 2))
         
         # Cluster orders
-        clusters = self.kmeans_clustering(eligible_orders, n_clusters)
+        clusters = self.kmeans_clustering(highway_filtered_orders, n_clusters)
+        
+        # NEW: Filter out clusters that deviate too far from highway
+        valid_clusters = [
+            cluster for cluster in clusters
+            if self.validate_cluster_highway_deviation(cluster, max_highway_deviation_km)
+        ]
+        
+        # If all clusters were filtered out, use original clusters
+        if not valid_clusters:
+            import logging
+            logging.warning(
+                f"All {len(clusters)} clusters exceed {max_highway_deviation_km}km highway deviation. "
+                f"Using unfiltered clusters to prevent empty batch result."
+            )
+            valid_clusters = clusters
         
         # Balance batch sizes
-        balanced_batches = self.balance_batches(clusters)
+        balanced_batches = self.balance_batches(valid_clusters)
         
         # Merge small batches if beneficial
         final_batches = self.merge_small_batches(balanced_batches)

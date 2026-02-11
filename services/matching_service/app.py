@@ -2,12 +2,19 @@
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import json
 import os
 import math
 import random
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    POSTGIS_AVAILABLE = True
+except ImportError:
+    POSTGIS_AVAILABLE = False
 
 app = FastAPI(title="Matching Service", version="1.0.0")
 
@@ -23,6 +30,27 @@ def load_config():
 config = load_config()
 random.seed(config.get("seed", 42))
 
+# Database connection helper
+def get_db_connection():
+    """Get database connection if available"""
+    if not POSTGIS_AVAILABLE:
+        return None
+    
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return None
+    
+    try:
+        return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+    except Exception:
+        return None
+
+class DriverStatus(BaseModel):
+    """Previous driver location for trajectory calculation"""
+    lat: float
+    lng: float
+    timestamp: datetime
+
 class Driver(BaseModel):
     id: str
     lat: float = Field(..., ge=-90, le=90)
@@ -32,6 +60,7 @@ class Driver(BaseModel):
     is_active: bool = True
     current_orders: int = Field(0, ge=0)
     max_concurrent_orders: int = Field(8, ge=1)
+    previous_location: Optional[DriverStatus] = None  # For trajectory calculation
 
 class BatchData(BaseModel):
     id: str
@@ -53,6 +82,8 @@ class DriverScore(BaseModel):
     capacity_utilization: float
     rating: float
     availability_factor: float
+    artery_score: Optional[float] = None  # Highway 7 proximity score
+    trajectory_score: Optional[float] = None  # Moving toward pickup score
 
 class AssignmentResponse(BaseModel):
     recommended_driver: Optional[DriverScore]
@@ -75,8 +106,14 @@ class AcceptanceResponse(BaseModel):
 class MatchingEngine:
     """Driver matching engine with scoring and acceptance prediction"""
     
+    # Constants for trajectory and movement detection
+    MOVEMENT_EPSILON = 0.0001  # Threshold for detecting stationary drivers (degrees)
+    TRAJECTORY_NEUTRAL_SCORE = 0.5  # Score when no trajectory data available
+    ARTERY_FALLBACK_SCORE = 0.5  # Score when PostGIS unavailable
+    
     def __init__(self, config: Dict[str, Any]):
         self.config = config
+        self._highway_geometry_cache = None  # Cache for Highway 7 geometry
     
     def haversine_distance(self, lat1: float, lng1: float, lat2: float, lng2: float) -> float:
         """Calculate haversine distance between two points in kilometers"""
@@ -128,6 +165,105 @@ class MatchingEngine:
         """Score based on driver rating (5.0 is perfect)"""
         return rating / 5.0
     
+    def get_artery_position_fraction(self, lat: float, lng: float) -> Optional[float]:
+        """
+        Calculate position on Highway 7 artery using PostGIS ST_LineLocatePoint
+        Returns a fraction (0.0 to 1.0) representing position along the artery
+        """
+        conn = get_db_connection()
+        if not conn:
+            return None
+        
+        try:
+            with conn.cursor() as cur:
+                # Get the Highway 7 artery and calculate line locate point
+                cur.execute("""
+                    SELECT ST_LineLocatePoint(
+                        route_geometry::geometry,
+                        ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+                    ) as fraction
+                    FROM highway_arteries
+                    WHERE name = 'Highway 7'
+                    LIMIT 1
+                """, (lng, lat))
+                
+                result = cur.fetchone()
+                if result:
+                    return float(result['fraction'])
+                return None
+        except Exception:
+            return None
+        finally:
+            conn.close()
+    
+    def calculate_artery_proximity_score(self, driver_lat: float, driver_lng: float,
+                                        pickup_lat: float, pickup_lng: float) -> float:
+        """
+        Calculate score based on proximity to Highway 7 artery
+        Higher score if both driver and pickup are near the artery
+        """
+        driver_fraction = self.get_artery_position_fraction(driver_lat, driver_lng)
+        pickup_fraction = self.get_artery_position_fraction(pickup_lat, pickup_lng)
+        
+        if driver_fraction is None or pickup_fraction is None:
+            # Fallback to neutral score if PostGIS unavailable
+            return self.ARTERY_FALLBACK_SCORE
+        
+        # Score based on how close driver and pickup are along the artery
+        # Closer positions = higher score
+        distance_along_artery = abs(driver_fraction - pickup_fraction)
+        
+        # If they're close along the artery (within 20% of total length), high score
+        if distance_along_artery < 0.2:
+            return 1.0
+        elif distance_along_artery < 0.4:
+            return 0.8
+        elif distance_along_artery < 0.6:
+            return 0.5
+        else:
+            return 0.3
+    
+    def calculate_trajectory_score(self, driver: Driver, pickup_lat: float, pickup_lng: float) -> float:
+        """
+        Calculate score based on driver's trajectory toward the pickup
+        Uses last two driver_status points to determine direction of movement
+        """
+        if not driver.previous_location:
+            # No trajectory data available
+            return self.TRAJECTORY_NEUTRAL_SCORE
+        
+        # Calculate vector from previous to current location (driver's movement)
+        prev_lat = driver.previous_location.lat
+        prev_lng = driver.previous_location.lng
+        
+        # Driver's movement vector
+        movement_lat = driver.lat - prev_lat
+        movement_lng = driver.lng - prev_lng
+        
+        # Vector from current location to pickup
+        to_pickup_lat = pickup_lat - driver.lat
+        to_pickup_lng = pickup_lng - driver.lng
+        
+        # Calculate dot product to determine alignment
+        # If movement aligns with direction to pickup, score is higher
+        dot_product = (movement_lat * to_pickup_lat + movement_lng * to_pickup_lng)
+        
+        # Normalize by magnitudes
+        movement_magnitude = math.sqrt(movement_lat**2 + movement_lng**2)
+        to_pickup_magnitude = math.sqrt(to_pickup_lat**2 + to_pickup_lng**2)
+        
+        if movement_magnitude < self.MOVEMENT_EPSILON or to_pickup_magnitude < self.MOVEMENT_EPSILON:
+            # Driver is stationary or at pickup location
+            return self.TRAJECTORY_NEUTRAL_SCORE
+        
+        # Cosine similarity: -1 (opposite) to 1 (same direction)
+        cosine_sim = dot_product / (movement_magnitude * to_pickup_magnitude)
+        
+        # Map to 0-1 score: moving toward = 1.0, perpendicular = 0.5, away = 0.0
+        trajectory_score = (cosine_sim + 1.0) / 2.0
+        
+        return trajectory_score
+    
     def calculate_availability_score(self, driver: Driver) -> float:
         """Score based on current availability"""
         if not driver.is_active:
@@ -157,7 +293,7 @@ class MatchingEngine:
     
     def calculate_composite_score(self, driver: Driver, batch: BatchData, 
                                 distance_km: float, max_distance: float) -> DriverScore:
-        """Calculate composite matching score"""
+        """Calculate composite matching score with trajectory matching"""
         
         # Individual component scores
         distance_score = self.calculate_distance_score(distance_km, max_distance)
@@ -166,13 +302,23 @@ class MatchingEngine:
         availability_score = self.calculate_availability_score(driver)
         incentive_score = self.calculate_incentive_score(driver, batch)
         
-        # Weighted composite score
+        # NEW: Trajectory-based scores
+        artery_score = self.calculate_artery_proximity_score(
+            driver.lat, driver.lng, batch.center_lat, batch.center_lng
+        )
+        trajectory_score = self.calculate_trajectory_score(
+            driver, batch.center_lat, batch.center_lng
+        )
+        
+        # Updated weighted composite score with trajectory matching
         weights = {
-            'distance': 0.35,    # Proximity is very important
-            'capacity': 0.25,    # Can they handle the batch?
-            'rating': 0.15,      # Quality of service
-            'availability': 0.15, # Current workload
-            'incentive': 0.10    # Special circumstances
+            'distance': 0.20,      # Reduced from 0.35 - still important but not primary
+            'capacity': 0.20,      # Reduced from 0.25
+            'rating': 0.10,        # Reduced from 0.15
+            'availability': 0.10,  # Reduced from 0.15
+            'incentive': 0.05,     # Reduced from 0.10
+            'artery': 0.20,        # NEW: Highway 7 proximity
+            'trajectory': 0.15     # NEW: Moving toward pickup
         }
         
         composite_score = (
@@ -180,7 +326,9 @@ class MatchingEngine:
             capacity_score * weights['capacity'] +
             rating_score * weights['rating'] +
             availability_score * weights['availability'] +
-            incentive_score * weights['incentive']
+            incentive_score * weights['incentive'] +
+            artery_score * weights['artery'] +
+            trajectory_score * weights['trajectory']
         )
         
         # If driver cannot handle the batch at all, score is 0
@@ -193,7 +341,9 @@ class MatchingEngine:
             distance_km=distance_km,
             capacity_utilization=(driver.current_orders + batch.total_orders) / driver.max_concurrent_orders,
             rating=driver.rating,
-            availability_factor=availability_score
+            availability_factor=availability_score,
+            artery_score=artery_score,
+            trajectory_score=trajectory_score
         )
     
     def find_best_drivers(self, batch: BatchData, drivers: List[Driver], 

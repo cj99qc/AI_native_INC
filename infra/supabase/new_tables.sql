@@ -180,6 +180,27 @@ CREATE INDEX IF NOT EXISTS idx_sim_runs_created_at ON sim_runs (created_at);
 CREATE INDEX IF NOT EXISTS idx_embedding_index_content_type ON embedding_index (content_type);
 CREATE INDEX IF NOT EXISTS idx_embedding_index_content_id ON embedding_index (content_id);
 
+-- Highway 7 Artery reference line for trajectory matching
+CREATE TABLE IF NOT EXISTS highway_arteries (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(100) NOT NULL,
+    route_geometry GEOGRAPHY(LINESTRING, 4326) NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Create index for spatial queries on highway arteries
+CREATE INDEX IF NOT EXISTS idx_highway_arteries_geometry ON highway_arteries USING GIST (route_geometry);
+
+-- Insert Highway 7 main artery (Ottawa area - example coordinates)
+-- This represents a simplified Highway 7 corridor through the Ottawa region
+INSERT INTO highway_arteries (name, route_geometry, description)
+VALUES (
+    'Highway 7',
+    ST_GeogFromText('LINESTRING(-75.9 45.35, -75.85 45.36, -75.80 45.37, -75.75 45.38, -75.70 45.39, -75.65 45.40, -75.60 45.41, -75.55 45.42, -75.50 45.43)'),
+    'Main Highway 7 artery through Ottawa region for trajectory matching'
+) ON CONFLICT DO NOTHING;
+
 -- Row Level Security policies (basic examples - adjust based on your auth system)
 ALTER TABLE drivers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE driver_status ENABLE ROW LEVEL SECURITY;
@@ -190,6 +211,7 @@ ALTER TABLE route_stops ENABLE ROW LEVEL SECURITY;
 ALTER TABLE escrow_payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE sim_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE embedding_index ENABLE ROW LEVEL SECURITY;
+ALTER TABLE highway_arteries ENABLE ROW LEVEL SECURITY;
 
 -- Basic RLS policies (you may need to adjust these based on your specific auth requirements)
 CREATE POLICY "Drivers can view own data" ON drivers FOR SELECT USING (user_id = auth.uid());
@@ -199,5 +221,8 @@ CREATE POLICY "Driver status visible to drivers and admins" ON driver_status FOR
     EXISTS (SELECT 1 FROM drivers WHERE drivers.id = driver_status.driver_id AND drivers.user_id = auth.uid())
     OR EXISTS (SELECT 1 FROM profiles WHERE profiles.id = auth.uid() AND profiles.role = 'admin')
 );
+
+-- Highway arteries are publicly readable
+CREATE POLICY "Highway arteries are public" ON highway_arteries FOR SELECT USING (true);
 
 -- TODO: Add more specific RLS policies based on your application's access patterns
