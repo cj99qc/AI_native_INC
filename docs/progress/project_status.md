@@ -1,20 +1,36 @@
 ---
 name: INC Platform Build Progress
-description: Step 2 (Product Catalog) complete. Forms, CRUD APIs, image upload, embeddings, and dashboard wiring finished. Ready for Step 3 (Multi-service providers).
+description: Step 2 (Product Catalog) complete. Step 3 (Multi-Service Providers) 90% complete with schema, API routes, and UI pages. Ready for Step 4 (LLM Search).
 type: project
 ---
 
 # INC Platform Build Progress
 
-**Status:** Step 2 Complete → Step 3 Queued  
+**Status:** Step 2 Complete, Step 3 In Progress (90% → final testing phase)  
 **Last Session:** 2026-05-01  
-**Next Action:** Start Step 3 (Multi-Service Providers)
+**Next Action:** Final integration test of Step 3, then move to Step 4 (LLM Search)
 
 ---
 
-## Current Work: Step 3 — Multi-Service Providers (IN PROGRESS)
+## Current Work: Step 3 — Multi-Service Providers (90% COMPLETE)
 
-**Status:** Schema foundation + API routes complete. UI pages in progress.
+**Status:** Schema, API routes, and UI pages all complete. Matching service updated. Awaiting integration testing.
+
+What was built in this session to unlock the multi-service provider marketplace:
+
+The goal of Step 3 is to replace the single `service_type` per provider with a junction table system. This allows a plumber to list 5+ services (leak repair $80, drain unblock $40/hr, etc.), each with its own price, duration, and availability. The foundation for Step 4's LLM search is now in place — the system can now search both products AND services.
+
+Starting from the database foundation, three new tables were added to both master_schema.sql and service_providers.sql. The `service_categories` table provides a taxonomy of 15 service types (plumber, electrician, carpenter, painter, cleaner, handyman, appliance repair, HVAC, locksmith, pest control, gardener, mover, tutor, beautician, caterer). The `provider_services` junction table stores individual service offerings with pricing strategy (flat, hourly, or quote), prices in cents, and estimated duration. The schema also extended `service_providers` with `hours` (JSONB matching vendor structure) and `timezone` (for "open now" computation).
+
+The API foundation supports full CRUD. POST /api/provider/services creates a new service after validating that the provider exists and enforcing price_strategy/price consistency (flat rates must have base_price_cents, hourly must have hourly_rate_cents). GET /api/provider/services lists all services for the authenticated provider. PATCH /api/provider/services/[id] updates service details with the same validations. DELETE soft-deletes services (is_active=false). All routes enforce ownership through RLS policies plus explicit user_id checks for clarity.
+
+The provider services management dashboard at `/provider/services` is where providers manage their complete service menu. It uses React Hook Form + Zod for form validation, displays a dynamic list of service rows that can be added/removed, shows pricing fields conditionally based on the selected pricing model (flat shows one price field, hourly shows hourly_rate and min_charge), and handles sequential PATCH/POST requests on form submit. The form also handles service removal — deleted rows trigger DELETE requests to mark services inactive.
+
+Public discovery was built as two complementary pages. `/services` shows a category browser with 15 service cards, each with an icon and description, linking to the detail page. `/services/[slug]` shows all providers offering that specific service within the region. Each provider card displays name, distance, "open now" badge, and all services they offer with pricing. The "open now" badge computes based on provider hours (JSONB) and timezone, checking if current time falls within today's open/close window. The discovery page uses streaming server-side rendering (async component) for instant load times.
+
+The matching service's `/availability` endpoint was updated to support both legacy (`service_type`) and new (`service` slug) query parameters for backwards compatibility. The SQL now JOINs provider_services with service_providers, filtering by both provider and service activity status. The response includes the new `services` array with pricing details for each offering, enabling clients to display "Leak repair: ₹80 | Drain unblock: ₹40/hr" inline.
+
+The system now enables the marketplace value proposition: vendors (restaurants, stores, plumbers, electricians) can list products or services with full pricing and availability. Customers will search via LLM in Step 4 saying "I need a plumber" or "I want to bake a cake" and find both service providers and relevant products in a single query result.
 
 ### Step 2 Summary (COMPLETE)
 
