@@ -894,4 +894,112 @@ where sp.service_type is not null
     select 1 from public.provider_services ps where ps.provider_id = sp.id
   );
 
+-- ============================================================================
+-- SEARCH EVENTS (Step 4: Unified LLM Search telemetry)
+-- ============================================================================
+-- Every unified search records the query, classified intent, decomposition,
+-- and result count. Used for tuning the intent classifier and tracking what
+-- customers are actually looking for.
+
+create table if not exists public.search_events (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid references auth.users(id) on delete set null,
+  query        text not null,
+  intent       text not null check (intent in ('product', 'service', 'goal', 'unknown')),
+  components   jsonb,
+  service_slug text,
+  latency_ms   integer not null,
+  num_results  integer not null,
+  cache_hit    boolean not null default false,
+  created_at   timestamptz not null default now()
+);
+
+create index if not exists idx_search_events_user_created
+  on public.search_events(user_id, created_at desc);
+
+create index if not exists idx_search_events_intent_created
+  on public.search_events(intent, created_at desc);
+
+alter table public.search_events enable row level security;
+
+-- Users can only see their own search history; admins see everything.
+drop policy if exists search_events_owner_read on public.search_events;
+create policy search_events_owner_read on public.search_events
+  for select using (auth.uid() = user_id);
+
+drop policy if exists search_events_admin_read on public.search_events;
+create policy search_events_admin_read on public.search_events
+  for select using (
+    exists(select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin')
+  );
+
+-- Anyone authenticated (and even anon for telemetry on public search) can insert.
+drop policy if exists search_events_insert on public.search_events;
+create policy search_events_insert on public.search_events
+  for insert with check (true);
+
+-- ============================================================================
+-- RPC: match_products_nearby (Step 4)
+-- ============================================================================
+-- Single-query semantic + location filter for products. Replaces the N+1
+-- pattern in the older /api/search/semantic route where each candidate was
+-- checked individually for proximity.
+--
+-- Returns products that are (a) semantically similar to query_embedding above
+-- match_threshold, (b) within search_radius_km of (search_lat, search_lng), and
+-- (c) active. Ordered by similarity descending.
+
+create or replace function public.match_products_nearby(
+  query_embedding vector(1536),
+  search_lat      float,
+  search_lng      float,
+  search_radius_km float default 5.0,
+  match_threshold float default 0.2,
+  match_count     int   default 20
+) returns table (
+  id           uuid,
+  name         text,
+  description  text,
+  price        numeric,
+  vendor_id    uuid,
+  unit         text,
+  currency     text,
+  images       text[],
+  category_id  uuid,
+  similarity   float,
+  distance_km  float
+)
+language sql stable as $$
+  select
+    p.id,
+    p.name,
+    p.description,
+    p.price,
+    p.vendor_id,
+    p.unit,
+    p.currency,
+    p.images,
+    p.category_id,
+    (1 - (p.embedding <=> query_embedding))::float as similarity,
+    (st_distance(
+        p.geo_point,
+        st_setsrid(st_point(search_lng, search_lat), 4326)::geography
+    ) / 1000.0)::float as distance_km
+  from public.products p
+  where p.is_active = true
+    and p.embedding is not null
+    and p.geo_point is not null
+    and (1 - (p.embedding <=> query_embedding)) >= match_threshold
+    and st_dwithin(
+        p.geo_point,
+        st_setsrid(st_point(search_lng, search_lat), 4326)::geography,
+        least(search_radius_km, coalesce(p.availability_radius_km, search_radius_km)) * 1000
+    )
+  order by p.embedding <=> query_embedding
+  limit match_count;
+$$;
+
+grant execute on function public.match_products_nearby(vector, float, float, float, float, int)
+  to anon, authenticated;
+
 grant execute on function expire_auctions() to anon, authenticated;
