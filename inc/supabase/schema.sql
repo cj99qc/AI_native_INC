@@ -50,6 +50,15 @@ create table if not exists public.profiles (
   created_at timestamptz default now()
 );
 
+-- Product Categories
+create table if not exists public.product_categories (
+  id           uuid primary key default gen_random_uuid(),
+  slug         text unique not null,
+  name         text not null,
+  parent_id    uuid references public.product_categories(id) on delete set null,
+  created_at   timestamptz not null default now()
+);
+
 -- Products
 create table if not exists public.products (
   id uuid primary key default gen_random_uuid(),
@@ -57,12 +66,17 @@ create table if not exists public.products (
   description text,
   price numeric(12,2) not null check (price > 0),
   vendor_id uuid not null references public.profiles(id) on delete cascade,
+  category_id uuid references public.product_categories(id) on delete set null,
+  unit text not null default 'each', -- 'kg', 'each', 'litre', 'gram', etc.
+  currency text not null default 'INR', -- 'INR', 'CAD', 'USD', etc.
   embedding vector(1536),
   stock int not null default 0 check (stock >= 0),
   images text[] default '{}',
+  is_active boolean not null default true,
   availability_radius_km float default 30 check (availability_radius_km > 0),
   geo_point geography(POINT,4326), -- Vendor location for proximity searches
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  updated_at timestamptz default now()
 );
 
 -- Orders
@@ -201,7 +215,11 @@ create table if not exists public.batch_jobs (
 );
 
 -- Indexes
+create index if not exists idx_product_categories_slug on public.product_categories(slug);
+create index if not exists idx_product_categories_parent on public.product_categories(parent_id);
 create index if not exists idx_products_vendor on public.products(vendor_id);
+create index if not exists idx_products_category on public.products(category_id);
+create index if not exists idx_products_active on public.products(is_active) where is_active = true;
 create index if not exists idx_orders_customer on public.orders(customer_id);
 create index if not exists idx_orders_vendor on public.orders(vendor_id);
 create index if not exists idx_delivery_jobs_driver on public.delivery_jobs(driver_id);
@@ -463,14 +481,280 @@ $$;
 
 grant execute on function public.calculate_distance(geography, geography) to anon, authenticated;
 
+-- Sponsored listings (vendor promotions, reviewed by admin)
+create table if not exists public.sponsored_listings (
+  id          uuid          primary key default gen_random_uuid(),
+  product_id  uuid          not null references public.products(id) on delete cascade,
+  vendor_id   uuid          not null references public.profiles(id) on delete cascade,
+  daily_budget numeric(12,2) not null check (daily_budget > 0),
+  status      text          not null default 'pending',
+  created_at  timestamptz   default now()
+);
+
+create index if not exists idx_sponsored_vendor  on public.sponsored_listings(vendor_id);
+create index if not exists idx_sponsored_status  on public.sponsored_listings(status);
+create index if not exists idx_sponsored_product on public.sponsored_listings(product_id);
+
+alter table public.sponsored_listings enable row level security;
+
+-- Vendors manage their own listings; admins read and update all
+drop policy if exists sponsored_vendor_own on public.sponsored_listings;
+create policy sponsored_vendor_own on public.sponsored_listings
+  for all using (auth.uid() = vendor_id) with check (auth.uid() = vendor_id);
+
+drop policy if exists sponsored_admin_all on public.sponsored_listings;
+create policy sponsored_admin_all on public.sponsored_listings
+  for all using (
+    exists(select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin')
+  );
+
+-- ─── Support Tickets ─────────────────────────────────────────────────────────
+
+do $$ begin
+  create type ticket_category as enum (
+    'missing_item',
+    'wrong_item',
+    'damaged_item',
+    'delivery_delay',
+    'driver_behavior',
+    'payment_issue',
+    'other'
+  );
+exception when duplicate_object then null; end $$;
+
+do $$ begin
+  create type ticket_status as enum ('open', 'in_progress', 'resolved', 'closed');
+exception when duplicate_object then null; end $$;
+
+do $$ begin
+  create type ticket_priority as enum ('low', 'normal', 'high', 'urgent');
+exception when duplicate_object then null; end $$;
+
+create table if not exists public.support_tickets (
+  id              uuid             primary key default gen_random_uuid(),
+  user_id         uuid             not null references public.profiles(id) on delete cascade,
+  order_id        uuid             references public.orders(id) on delete set null,
+  category        ticket_category  not null,
+  description     text             not null check (char_length(description) >= 10),
+  status          ticket_status    not null default 'open',
+  priority        ticket_priority  not null default 'normal',
+  -- lat/lng stored as floats; geography auto-computed by trigger below
+  location_lat    float,
+  location_lng    float,
+  location        geography(POINT, 4326),
+  assigned_to     uuid             references public.profiles(id) on delete set null,
+  resolution_note text,
+  resolved_at     timestamptz,
+  created_at      timestamptz      default now(),
+  updated_at      timestamptz      default now()
+);
+
+-- Auto-compute geography from lat/lng on insert or update
+create or replace function public.compute_ticket_location()
+returns trigger language plpgsql as $$
+begin
+  if new.location_lat is not null and new.location_lng is not null then
+    new.location = st_setsrid(st_makepoint(new.location_lng, new.location_lat), 4326)::geography;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists ticket_location_trigger on public.support_tickets;
+create trigger ticket_location_trigger
+  before insert or update on public.support_tickets
+  for each row execute function public.compute_ticket_location();
+
+-- Auto-update updated_at
+drop trigger if exists ticket_updated_at on public.support_tickets;
+create trigger ticket_updated_at
+  before update on public.support_tickets
+  for each row execute function public.update_updated_at_column();
+
+-- Indexes
+create index if not exists idx_tickets_user     on public.support_tickets(user_id);
+create index if not exists idx_tickets_order    on public.support_tickets(order_id);
+create index if not exists idx_tickets_status   on public.support_tickets(status);
+create index if not exists idx_tickets_category on public.support_tickets(category);
+create index if not exists idx_tickets_location on public.support_tickets using gist (location);
+
+-- RLS
+alter table public.support_tickets enable row level security;
+
+-- Users can insert their own tickets
+drop policy if exists tickets_insert_own on public.support_tickets;
+create policy tickets_insert_own on public.support_tickets
+  for insert with check (auth.uid() = user_id);
+
+-- Users can read their own tickets
+drop policy if exists tickets_select_own on public.support_tickets;
+create policy tickets_select_own on public.support_tickets
+  for select using (auth.uid() = user_id);
+
+-- Admins can read and update all tickets
+drop policy if exists tickets_admin_all on public.support_tickets;
+create policy tickets_admin_all on public.support_tickets
+  for all using (
+    exists(select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin')
+  );
+
+-- ─── Ticket Messages (user-admin thread) ─────────────────────────────────────
+
+create table if not exists public.ticket_messages (
+  id          uuid        primary key default gen_random_uuid(),
+  ticket_id   uuid        not null references public.support_tickets(id) on delete cascade,
+  sender_id   uuid        not null references public.profiles(id) on delete cascade,
+  sender_role user_role   not null,
+  body        text        not null check (char_length(body) > 0),
+  created_at  timestamptz default now()
+);
+
+create index if not exists idx_ticket_messages_ticket on public.ticket_messages(ticket_id);
+create index if not exists idx_ticket_messages_sender on public.ticket_messages(sender_id);
+
+alter table public.ticket_messages enable row level security;
+
+-- Users can insert messages on their own tickets
+drop policy if exists ticket_messages_insert_own on public.ticket_messages;
+create policy ticket_messages_insert_own on public.ticket_messages
+  for insert with check (
+    auth.uid() = sender_id
+    and exists(
+      select 1 from public.support_tickets t
+      where t.id = ticket_id and t.user_id = auth.uid()
+    )
+  );
+
+-- Users can read messages on their own tickets
+drop policy if exists ticket_messages_select_own on public.ticket_messages;
+create policy ticket_messages_select_own on public.ticket_messages
+  for select using (
+    exists(
+      select 1 from public.support_tickets t
+      where t.id = ticket_id and t.user_id = auth.uid()
+    )
+  );
+
+-- Admins can read and insert on all tickets
+drop policy if exists ticket_messages_admin_all on public.ticket_messages;
+create policy ticket_messages_admin_all on public.ticket_messages
+  for all using (
+    exists(select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin')
+  );
+
 -- Function to automatically expire auctions
 create or replace function expire_auctions()
 returns void language plpgsql as $$
 begin
-  update public.auctions 
-  set status = 'expired' 
+  update public.auctions
+  set status = 'expired'
   where status = 'active' and end_time < now();
 end;
 $$;
+
+-- ============================================================================
+-- Vendors (business profiles for sellers)
+-- ============================================================================
+-- A vendor row represents a small business that sells products on the platform.
+-- Linked 1-to-1 with auth.users via user_id; richer than profiles because a
+-- business has hours, KYC, payout, and a geocoded operating address.
+do $$ begin
+  create type vendor_payout_method as enum ('stripe_connect', 'manual_bank');
+exception when duplicate_object then null; end $$;
+
+do $$ begin
+  create type vendor_onboarding_status as enum ('pending', 'approved', 'rejected');
+exception when duplicate_object then null; end $$;
+
+create table if not exists public.vendors (
+  id                       uuid primary key default gen_random_uuid(),
+  user_id                  uuid not null unique references auth.users(id) on delete cascade,
+  business_name            text not null,
+  description              text,
+  category                 text, -- restaurant, grocery, bakery, hardware, pharmacy, other
+  phone                    text,
+  email                    text,
+  address                  text,
+  city                     text,
+  state                    text,
+  zip_code                 text,
+  latitude                 double precision,
+  longitude                double precision,
+  location                 geography(POINT, 4326),
+  hours                    jsonb default '{}'::jsonb,
+  -- KYC
+  kyc_business_license     text,
+  kyc_tax_id               text,
+  -- Payout
+  payout_method            vendor_payout_method,
+  stripe_connect_id        text,
+  -- Lifecycle
+  is_active                boolean not null default true,
+  onboarding_status        vendor_onboarding_status not null default 'pending',
+  rating                   float default 0 check (rating >= 0 and rating <= 5),
+  total_orders             int not null default 0,
+  created_at               timestamptz not null default now(),
+  updated_at               timestamptz not null default now()
+);
+
+-- Trigger to compute the GEOGRAPHY column from lat/lng
+-- (PostgREST clients cannot call ST_MakePoint directly)
+create or replace function public.compute_vendor_location()
+returns trigger language plpgsql as $$
+begin
+  if new.latitude is not null and new.longitude is not null then
+    new.location := ST_SetSRID(ST_MakePoint(new.longitude, new.latitude), 4326)::geography;
+  end if;
+  new.updated_at := now();
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_vendors_compute_location on public.vendors;
+create trigger trg_vendors_compute_location
+  before insert or update on public.vendors
+  for each row execute function public.compute_vendor_location();
+
+-- Indexes
+create index if not exists idx_vendors_user_id  on public.vendors(user_id);
+create index if not exists idx_vendors_location on public.vendors using gist(location);
+create index if not exists idx_vendors_active   on public.vendors(is_active) where is_active = true;
+create index if not exists idx_vendors_category on public.vendors(category);
+create index if not exists idx_vendors_onboarding_status on public.vendors(onboarding_status);
+
+-- RLS
+alter table public.vendors enable row level security;
+
+drop policy if exists vendors_public_read on public.vendors;
+create policy vendors_public_read on public.vendors
+  for select using (is_active = true or auth.uid() = user_id);
+
+drop policy if exists vendors_owner_write on public.vendors;
+create policy vendors_owner_write on public.vendors
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists vendors_admin_all on public.vendors;
+create policy vendors_admin_all on public.vendors
+  for all using (
+    exists(select 1 from public.profiles p where p.id = auth.uid() and p.role = 'admin')
+  );
+
+-- ============================================================================
+-- SEED DATA
+-- ============================================================================
+
+-- Product categories (10 starter categories)
+insert into public.product_categories (slug, name) values
+  ('groceries',    'Groceries'),
+  ('bakery',       'Bakery & Confectionery'),
+  ('hardware',     'Hardware & Tools'),
+  ('pharmacy',     'Pharmacy & Health'),
+  ('produce',      'Fruits & Vegetables'),
+  ('dairy',        'Dairy & Eggs'),
+  ('meat',         'Meat & Seafood'),
+  ('beverages',    'Beverages'),
+  ('home',         'Home & Kitchen'),
+  ('stationery',   'Stationery & Office')
+on conflict (slug) do nothing;
 
 grant execute on function expire_auctions() to anon, authenticated;

@@ -226,7 +226,7 @@ export default function VendorDashboard() {
           <p className="text-gray-600">Welcome back, {business.name}!</p>
         </div>
         <div className="flex items-center gap-4">
-          <Link href="/vendor/products">
+          <Link href="/vendor/products/new">
             <Button>
               <Plus className="h-4 w-4 mr-2" />
               Add Product
@@ -387,7 +387,7 @@ export default function VendorDashboard() {
         <TabsContent value="products" className="space-y-6">
           <div className="flex justify-between items-center">
             <h2 className="text-xl font-semibold">Your Products</h2>
-            <Link href="/vendor/products">
+            <Link href="/vendor/products/new">
               <Button>
                 <Plus className="h-4 w-4 mr-2" />
                 Add New Product
@@ -429,9 +429,11 @@ export default function VendorDashboard() {
                           <Eye className="h-4 w-4" />
                         </Button>
                       </Link>
-                      <Button size="sm" variant="outline">
-                        <Edit className="h-4 w-4" />
-                      </Button>
+                      <Link href={`/vendor/products/${product.id}/edit`}>
+                        <Button size="sm" variant="outline">
+                          <Edit className="h-4 w-4" />
+                        </Button>
+                      </Link>
                     </div>
                   </div>
                 </CardContent>
@@ -444,7 +446,7 @@ export default function VendorDashboard() {
               <Package className="h-16 w-16 mx-auto text-gray-400 mb-4" />
               <h3 className="text-lg font-semibold mb-2">No products yet</h3>
               <p className="text-gray-600 mb-4">Start by adding your first product to your store</p>
-              <Link href="/vendor/products">
+              <Link href="/vendor/products/new">
                 <Button>
                   <Plus className="h-4 w-4 mr-2" />
                   Add Your First Product
