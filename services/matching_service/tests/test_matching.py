@@ -3,6 +3,7 @@
 import pytest
 import math
 from datetime import datetime, timedelta
+from unittest.mock import patch, MagicMock
 from services.matching_service.app import (
     MatchingEngine, Driver, DriverStatus, BatchData, DriverScore
 )
@@ -356,3 +357,196 @@ class TestMatchingIntegration:
         inactive_result = next((r for r in results if r.driver_id == "driver_inactive"), None)
         if inactive_result:
             assert inactive_result.score == 0.0
+
+
+class TestServiceDiscovery:
+    """
+    Tests for GET /availability — Service Discovery (Phase 1)
+
+    All DB interactions are mocked so no live PostGIS instance is needed.
+    The endpoint logic lives in services/matching_service/app.py.
+    """
+
+    def _make_db_row(self, id, name, service_type, distance_km, description=None, contact_info=None):
+        """Helper: build a dict that mimics a psycopg2 RealDictRow."""
+        return {
+            "id": id,
+            "name": name,
+            "service_type": service_type,
+            "description": description,
+            "contact_info": contact_info,
+            "distance_km": distance_km,
+        }
+
+    def _make_mock_conn(self, fetchall_return=None, fetchone_return=None):
+        """Return a mock psycopg2 connection whose cursor yields given rows."""
+        mock_cur = MagicMock()
+        mock_cur.__enter__ = lambda s: mock_cur
+        mock_cur.__exit__ = MagicMock(return_value=False)
+        mock_cur.fetchall.return_value = fetchall_return or []
+        mock_cur.fetchone.return_value = fetchone_return
+
+        mock_conn = MagicMock()
+        mock_conn.cursor.return_value = mock_cur
+        return mock_conn, mock_cur
+
+    # ------------------------------------------------------------------
+    # 1. Providers within radius are returned
+    # ------------------------------------------------------------------
+    def test_providers_within_radius_returned(self):
+        """ST_DWithin returns rows → AvailabilityResponse contains them."""
+        from fastapi.testclient import TestClient
+        from services.matching_service.app import app
+
+        rows = [
+            self._make_db_row("uuid-1", "Alice Plumbing", "plumber", 1.2),
+            self._make_db_row("uuid-2", "Bob Plumbing", "plumber", 4.7),
+        ]
+        mock_conn, _ = self._make_mock_conn(fetchall_return=rows)
+
+        with patch("services.matching_service.app.get_db_connection", return_value=mock_conn):
+            client = TestClient(app)
+            resp = client.get(
+                "/availability",
+                params={"service_type": "plumber", "lat": 45.42, "lng": -75.69, "radius_km": 20.0},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 2
+        assert len(body["providers"]) == 2
+        assert body["providers"][0]["name"] == "Alice Plumbing"
+        assert body["providers"][1]["distance_km"] == pytest.approx(4.7, abs=0.01)
+        assert body["recommendation"] is None  # providers exist — no fallback needed
+
+    # ------------------------------------------------------------------
+    # 2. Providers outside radius are excluded (empty result → recommendation)
+    # ------------------------------------------------------------------
+    def test_no_providers_in_radius_returns_recommendation(self):
+        """
+        When ST_DWithin finds nothing, the endpoint falls back to nearest provider
+        outside the radius and returns it as a recommendation (InC Psychology).
+        """
+        from fastapi.testclient import TestClient
+        from services.matching_service.app import app
+
+        nearest_row = self._make_db_row("uuid-far", "Carol Cleaning", "cleaner", 35.0)
+        mock_conn, mock_cur = self._make_mock_conn(
+            fetchall_return=[],      # within-radius query
+            fetchone_return=nearest_row,  # nearest-outside query
+        )
+
+        with patch("services.matching_service.app.get_db_connection", return_value=mock_conn):
+            client = TestClient(app)
+            resp = client.get(
+                "/availability",
+                params={"service_type": "cleaner", "lat": 45.42, "lng": -75.69, "radius_km": 10.0},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 0
+        assert body["providers"] == []
+        assert body["recommendation"] is not None
+        rec = body["recommendation"]
+        assert rec["id"] == "uuid-far"
+        assert rec["name"] == "Carol Cleaning"
+        assert rec["distance_km"] == pytest.approx(35.0, abs=0.01)
+        # InC Psychology: message must tell the user something actionable
+        assert len(rec["message"]) > 0
+
+    # ------------------------------------------------------------------
+    # 3. No providers at all → empty response, no recommendation
+    # ------------------------------------------------------------------
+    def test_no_providers_anywhere_returns_empty(self):
+        """When there are zero active providers of this type anywhere, return empty."""
+        from fastapi.testclient import TestClient
+        from services.matching_service.app import app
+
+        mock_conn, _ = self._make_mock_conn(fetchall_return=[], fetchone_return=None)
+
+        with patch("services.matching_service.app.get_db_connection", return_value=mock_conn):
+            client = TestClient(app)
+            resp = client.get(
+                "/availability",
+                params={"service_type": "locksmith", "lat": 45.42, "lng": -75.69},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 0
+        assert body["providers"] == []
+        assert body["recommendation"] is None
+
+    # ------------------------------------------------------------------
+    # 4. DB unavailable → 503
+    # ------------------------------------------------------------------
+    def test_db_unavailable_returns_503(self):
+        """When get_db_connection returns None, endpoint must 503."""
+        from fastapi.testclient import TestClient
+        from services.matching_service.app import app
+
+        with patch("services.matching_service.app.get_db_connection", return_value=None):
+            client = TestClient(app)
+            resp = client.get(
+                "/availability",
+                params={"service_type": "plumber", "lat": 45.42, "lng": -75.69},
+            )
+
+        assert resp.status_code == 503
+
+    # ------------------------------------------------------------------
+    # 5. Response shape (AvailabilityResponse) is correct
+    # ------------------------------------------------------------------
+    def test_response_shape(self):
+        """All required fields are present in the response."""
+        from fastapi.testclient import TestClient
+        from services.matching_service.app import app
+
+        rows = [self._make_db_row("uuid-1", "Dan HVAC", "hvac", 2.5, description="24h service")]
+        mock_conn, _ = self._make_mock_conn(fetchall_return=rows)
+
+        with patch("services.matching_service.app.get_db_connection", return_value=mock_conn):
+            client = TestClient(app)
+            resp = client.get(
+                "/availability",
+                params={"service_type": "hvac", "lat": 45.42, "lng": -75.69},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        # Top-level fields
+        for field in ("providers", "count", "message", "recommendation"):
+            assert field in body, f"Missing top-level field: {field}"
+        # Provider fields
+        provider = body["providers"][0]
+        for field in ("id", "name", "service_type", "distance_km"):
+            assert field in provider, f"Missing provider field: {field}"
+        assert provider["description"] == "24h service"
+
+    # ------------------------------------------------------------------
+    # 6. Invalid query params → 422
+    # ------------------------------------------------------------------
+    def test_invalid_lat_returns_422(self):
+        """lat outside [-90, 90] must be rejected with 422."""
+        from fastapi.testclient import TestClient
+        from services.matching_service.app import app
+
+        client = TestClient(app)
+        resp = client.get(
+            "/availability",
+            params={"service_type": "plumber", "lat": 999, "lng": -75.69},
+        )
+        assert resp.status_code == 422
+
+    def test_missing_service_type_returns_422(self):
+        """Missing required service_type param must be rejected with 422."""
+        from fastapi.testclient import TestClient
+        from services.matching_service.app import app
+
+        client = TestClient(app)
+        resp = client.get(
+            "/availability",
+            params={"lat": 45.42, "lng": -75.69},
+        )
+        assert resp.status_code == 422

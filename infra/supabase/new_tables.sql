@@ -225,4 +225,62 @@ CREATE POLICY "Driver status visible to drivers and admins" ON driver_status FOR
 -- Highway arteries are publicly readable
 CREATE POLICY "Highway arteries are public" ON highway_arteries FOR SELECT USING (true);
 
+-- ============================================================================
+-- Vendors (small-business sellers on the marketplace)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS vendors (
+    id                       UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id                  UUID NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
+    business_name            TEXT NOT NULL,
+    description              TEXT,
+    category                 TEXT,
+    phone                    TEXT,
+    email                    TEXT,
+    address                  TEXT,
+    city                     TEXT,
+    state                    TEXT,
+    zip_code                 TEXT,
+    latitude                 DOUBLE PRECISION,
+    longitude                DOUBLE PRECISION,
+    location                 GEOGRAPHY(POINT, 4326),
+    hours                    JSONB DEFAULT '{}'::jsonb,
+    kyc_business_license     TEXT,
+    kyc_tax_id               TEXT,
+    payout_method            TEXT CHECK (payout_method IN ('stripe_connect', 'manual_bank')),
+    stripe_connect_id        TEXT,
+    is_active                BOOLEAN NOT NULL DEFAULT true,
+    onboarding_status        TEXT NOT NULL DEFAULT 'pending'
+        CHECK (onboarding_status IN ('pending', 'approved', 'rejected')),
+    rating                   DECIMAL(3,2) DEFAULT 0,
+    total_orders             INTEGER NOT NULL DEFAULT 0,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE OR REPLACE FUNCTION compute_vendor_location()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.latitude IS NOT NULL AND NEW.longitude IS NOT NULL THEN
+        NEW.location := ST_SetSRID(ST_MakePoint(NEW.longitude, NEW.latitude), 4326)::geography;
+    END IF;
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_vendors_compute_location ON vendors;
+CREATE TRIGGER trg_vendors_compute_location
+    BEFORE INSERT OR UPDATE ON vendors
+    FOR EACH ROW EXECUTE FUNCTION compute_vendor_location();
+
+CREATE INDEX IF NOT EXISTS idx_vendors_user_id            ON vendors(user_id);
+CREATE INDEX IF NOT EXISTS idx_vendors_location           ON vendors USING GIST(location);
+CREATE INDEX IF NOT EXISTS idx_vendors_active             ON vendors(is_active) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_vendors_category           ON vendors(category);
+CREATE INDEX IF NOT EXISTS idx_vendors_onboarding_status  ON vendors(onboarding_status);
+
+ALTER TABLE vendors ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Vendors public read"   ON vendors FOR SELECT USING (is_active = true OR user_id = auth.uid());
+CREATE POLICY "Vendors owner write"   ON vendors FOR ALL    USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid());
+
 -- TODO: Add more specific RLS policies based on your application's access patterns

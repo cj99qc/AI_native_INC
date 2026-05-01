@@ -159,7 +159,7 @@ from services.pricing_service.pricing import PricingEngine
 |---------|------|--------|-----------------|------------------|
 | **Pricing Service** | 8001 | Financial calculations | The Handshake | Order pricing, fees, driver payouts, commission calculations |
 | **Routing Service** | 8002 | Logistics optimization | **The Pulse** | Batching (K-means), route optimization (TSP), geospatial clustering |
-| **Matching Service** | 8003 | Driver assignment | **The Pulse** | Multi-factor driver scoring, trajectory matching, acceptance simulation |
+| **Matching Service** | 8003 | Driver assignment | **The Pulse** | Multi-factor driver scoring, trajectory matching, acceptance simulation, **autonomous background matching** |
 | **Escrow Service** | 8004 | Payment state management | **The Handshake** | Hold/release funds, disputes, refunds, automated trust |
 | **RAG Agent** | 8005 | Knowledge retrieval | Decision Support | Document ingestion, semantic search, context for automation |
 | **API Bridge** | 3001 | Service orchestration | The Artery | HTTP proxy connecting all services seamlessly |
@@ -174,11 +174,125 @@ The bridge proxies requests from Next.js to microservices:
 | `POST /api/routing/batch` | Routing (8002) | `POST /batch` |
 | `POST /api/routing/route` | Routing (8002) | `POST /route` |
 | `POST /api/matching/assign` | Matching (8003) | `POST /assign` |
+| `GET /api/matching/availability` | Matching (8003) | `GET /availability` |
 | `POST /api/escrow/hold` | Escrow (8004) | `POST /hold_funds` |
 | `POST /api/escrow/release` | Escrow (8004) | `POST /release_funds` |
+| `POST /api/escrow/dispute` | Escrow (8004) | `POST /dispute` |
+| `POST /api/escrow/refund` | Escrow (8004) | `POST /refund` |
+| `GET /api/escrow/order/:orderId` | Escrow (8004) | `GET /order/:orderId/escrows` |
+| `GET /api/escrow/:escrowId` | Escrow (8004) | `GET /escrow/:escrowId` |
+| `GET /api/matching/pulse/status` | Matching (8003) | `GET /pulse/status` |
 | `POST /api/rag/query` | RAG (8005) | `POST /query` |
 
+**Route order note:** `/api/escrow/order/:orderId` MUST be registered before `/api/escrow/:escrowId` in bridge.js to prevent Express matching `order` as an escrow ID.
+
 All services expose `/health` endpoints for monitoring.
+
+### Service Discovery (Phase 1)
+
+The Matching Service exposes a geospatial service-provider discovery endpoint:
+
+**`GET /availability`** (bridge: `GET /api/matching/availability`)
+
+Query params:
+- `service_type` (required) — e.g. `plumber`, `cleaner`, `courier`
+- `lat`, `lng` (required) — WGS-84 coordinates
+- `radius_km` (optional, default 20.0) — search radius
+
+**What it does:**
+- Uses `ST_DWithin` on `GEOGRAPHY(POINT, 4326)` for accurate radius filtering
+- Returns providers sorted by distance ascending
+- InC Psychology: if radius returns nothing, auto-recommends the nearest provider outside the radius with an actionable message ("Nearest plumber is 35km away — worth the trip?")
+
+**Database:** `service_providers` table (see `infra/supabase/service_providers.sql`)
+- GIST index on `location` for fast proximity queries
+- RLS: active providers publicly discoverable; providers manage their own record
+
+**Example response:**
+```json
+{
+  "providers": [{"id": "...", "name": "Alice Plumbing", "distance_km": 1.2, ...}],
+  "count": 1,
+  "message": "Found 1 plumber near you",
+  "recommendation": null
+}
+```
+
+### Support Ticketing System
+
+The platform has a full support workflow connecting users, the escrow Handshake, and The Pulse:
+
+**User flow:**
+1. `/support/new` — Submit ticket (7 InC Psychology category buttons, optional geolocation, order auto-link from `?order_id=`)
+2. After submit → RAG query runs automatically (5s timeout, degrades gracefully)
+3. If RAG score ≥ 0.65 → "Anticipatory Solution" intercept shown: "We've seen this before. Would [solution] solve this now?"
+4. Accept → `POST /api/support/tickets/[id]/auto-resolve` → ticket resolved instantly
+5. Decline → normal success, ticket stays open
+6. `/support` — My Tickets list with status filter tabs
+7. `/tickets/[id]` — Ticket detail: Handshake escrow banner (when `status=held/disputed`), status timeline, message thread
+
+**Admin flow:**
+- `/admin/support` — Support Control Tower: all tickets, status/category filters, Pulse context badge per ticket (match_score, trajectory_score, driver_status fetched on expand), Quick Actions (Release Funds / Issue Refund) call escrow service via `/api/admin/support/escrow-action`
+
+**Key API routes (Next.js):**
+
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/api/support/tickets` | POST | Create ticket (validates category/description/order ownership) |
+| `/api/support/tickets/[id]/escrow` | GET | Fetch escrow state for linked order via bridge |
+| `/api/support/tickets/[id]/messages` | GET/POST | Thread read/write |
+| `/api/support/tickets/[id]/auto-resolve` | POST | Owner self-resolve after accepting RAG suggestion |
+| `/api/support/rag-suggest` | POST | Query RAG for similar resolved cases (5s timeout, degrades gracefully) |
+| `/api/admin/support/pulse-context` | GET | Fetch Pulse match + driver_status for admin queue |
+| `/api/admin/support/escrow-action` | POST | Admin quick-action: release or refund escrow from queue |
+
+**Schema additions** (`inc/supabase/schema.sql`):
+- `support_tickets` — enums: `ticket_category`, `ticket_status`, `ticket_priority`; trigger `compute_ticket_location()` auto-computes PostGIS GEOGRAPHY from `location_lat`/`location_lng` floats
+- `ticket_messages` — RLS: users read/write own ticket threads; admins read/write all
+
+**Critical patterns:**
+- Ticket geography is inserted via lat/lng floats + DB trigger (PostgREST cannot call `ST_MakePoint` directly)
+- RAG suggestion degrades silently — ticket is always created before RAG query runs
+- Escrow Quick Actions always go server-side (`/api/admin/support/escrow-action`) never client-direct
+- `ExpandedDetail` in admin queue uses AbortController cleanup to prevent state updates on unmount
+
+### The Pulse: Autonomous Background Matching
+
+The Matching Service includes **The Pulse** - a background worker that embodies "we anticipate, don't wait":
+
+**What it does:**
+- Continuously scans for active drivers (every 30 seconds by default)
+- Queries pending batches that need drivers
+- Pre-computes optimal matches using full matching engine
+- Stores results in `pulse_matches` table for instant retrieval
+
+**Key endpoints:**
+- `GET /pulse/matches` - Get pre-computed matches (< 10ms response)
+- `GET /pulse/status` - Check worker status and statistics
+
+**Configuration** (`config/defaults.json`):
+```json
+{
+  "pulse": {
+    "scan_interval_seconds": 30,
+    "match_expiry_minutes": 15,
+    "max_distance_km": 50.0,
+    "min_match_score": 0.3
+  }
+}
+```
+
+**Database:** `pulse_matches` table — defined in `infra/supabase/pulse_matches.sql` and included in `master_schema.sql`.
+
+**The Pulse starts automatically** when the matching service starts (if `DATABASE_URL` is set). If `DATABASE_URL` is absent, the service starts normally without The Pulse — no crash.
+
+**Dependency injection pattern** (`pulse_worker.py`):
+- `PulseWorker.__init__` receives `matching_engine` as a constructor argument
+- `app.py` owns the `MatchingEngine` instance and passes it to `init_pulse_worker(config, matching_engine)`
+- `pulse_worker.py` imports `BatchData`, `Driver`, `DriverStatus`, `MatchingEngine` from `app` at module level — this is safe because `pulse_worker` is only ever imported inside `startup_event`, by which time `app.py` is fully loaded in `sys.modules`
+- **Do not move `pulse_worker` import to module level in `app.py`** — that would create a real circular import
+
+See `services/matching_service/PULSE_README.md` for complete documentation.
 
 ## InC Psychology: UI/UX Patterns
 
@@ -235,10 +349,12 @@ services/
 │   ├── travel_time.py      # Distance/time calculations
 │   └── tests/
 ├── matching_service/
-│   ├── app.py              # Driver matching with trajectory scoring
+│   ├── app.py              # Driver matching, trajectory scoring, Pulse endpoints
+│   ├── pulse_worker.py     # The Pulse background worker (autonomous matching)
+│   ├── PULSE_README.md     # Pulse documentation and API examples
 │   └── tests/
 ├── escrow_service/
-│   ├── app.py              # Payment state machine
+│   ├── app.py              # Payment state machine with DB persistence (escrow_payments table)
 │   └── tests/
 ├── rag_agent/
 │   ├── app.py              # Semantic search and retrieval
@@ -283,9 +399,20 @@ config/
 
 infra/
 ├── env.example            # Environment variable template
+├── docker/
+│   └── 00_auth_stub.sql   # Local Docker auth schema stub (Supabase auth.users replacement)
 └── supabase/
-    └── new_tables.sql     # Database schema for logistics tables
+    ├── master_schema.sql       # Complete schema: all tables, indices, triggers, RLS, sample data
+    ├── new_tables.sql          # Legacy: subset of master_schema (used in Docker init)
+    ├── pulse_matches.sql       # pulse_matches table (used in Docker init)
+    └── service_providers.sql   # service_providers table — Service Discovery (Phase 1)
 ```
+
+**Docker Init Order** (`docker-entrypoint-initdb.d/`):
+1. `00_auth_stub.sql` — creates `auth.users` stub for local Postgres
+2. `01_new_tables.sql` — core tables (drivers, batches, orders, etc.)
+3. `02_pulse_matches.sql` — pulse_matches table (depends on drivers + batches)
+4. `03_service_providers.sql` — service_providers table with PostGIS GIST index
 
 ## Configuration
 
@@ -311,24 +438,49 @@ Required for integration:
 - `USE_ROUTING_SERVICE=true` - Enable routing service
 - `BRIDGE_URL=http://localhost:3001` - API bridge URL
 - `DOCKER_ENV=false` - Set to `true` when using Docker Compose
+- `DATABASE_URL=postgresql://user:pass@host:5432/db` - Required by matching service (The Pulse) and escrow service (DB persistence)
 
 External services:
 - `OPENAI_API_KEY` - OpenAI API key (for fallback routing and chat)
 - `STRIPE_SECRET_KEY` - Stripe secret key
 - `SUPABASE_URL` and `SUPABASE_ANON_KEY` - Supabase credentials
 
+**Docker Compose sets `DATABASE_URL` automatically** for matching and escrow services. When running locally without Docker, set it manually or The Pulse will not start (graceful skip) and escrow will use in-memory only.
+
 ## Database Schema
 
-New tables added for logistics operations (see `infra/supabase/new_tables.sql`):
+The complete schema lives in `infra/supabase/master_schema.sql`. Apply it to Supabase directly. For local Docker it is split across the init scripts above.
 
-- `drivers` - Driver profiles, **locations (PostGIS GEOGRAPHY)**, and status
-- `batches` - Order groupings for efficient delivery
-- `routes` - Optimized delivery paths with **geospatial waypoints**
-- `route_stops` - Individual pickup/delivery points with **PostGIS coordinates**
-- `escrow_payments` - Payment state management (The Handshake)
-- `sim_runs` - Simulation results and KPIs
+| Table | Purpose |
+|---|---|
+| `profiles` | Extends Supabase auth.users with role/avatar |
+| `vendors` | Restaurant/store profiles with PostGIS location |
+| `drivers` | Driver profiles, PostGIS location, vehicle capacity |
+| `driver_status` | Location history for trajectory matching |
+| `orders` | Customer orders with PostGIS pickup/delivery points |
+| `batches` | Order groupings for efficient delivery |
+| `batch_items` | Orders within a batch with PostGIS coordinates |
+| `routes` | Optimized delivery paths (PostGIS LINESTRING) |
+| `route_stops` | Individual pickup/delivery stops |
+| `escrow_payments` | Payment state machine — The Handshake |
+| `pulse_matches` | Pre-computed autonomous matches — The Pulse |
+| `service_providers` | Service provider registry with PostGIS location — Service Discovery |
+| `highway_arteries` | Artery geometries for trajectory scoring (Hwy 7, Hwy 417) |
+| `sim_runs` | Simulation results and KPIs |
+| `embedding_index` | RAG vector embeddings |
+| `notifications` | Driver/customer push notifications |
+| `support_tickets` | Customer support tickets — The Handshake dispute resolution |
+| `ticket_messages` | User-admin message thread per ticket |
 
-**Geospatial First:** All location fields use PostgreSQL PostGIS `GEOGRAPHY` types for accurate distance calculations and spatial queries. Never use simple lat/lng columns with Euclidean distance.
+**Geospatial First:** All location fields use PostgreSQL PostGIS `GEOGRAPHY(POINT, 4326)` types. Never use Euclidean distance on lat/lng columns.
+
+**master_schema.sql includes:**
+- All tables with `CREATE TABLE IF NOT EXISTS`
+- Performance indices on all key lookup fields
+- `update_updated_at_column()` trigger on all mutable tables
+- `cleanup_expired_pulse_matches()` function
+- Row Level Security (RLS) policies for all tables
+- Sample data: Highway 7 and Highway 417 artery geometries
 
 ## Key Technologies
 
@@ -417,6 +569,12 @@ echo $BRIDGE_URL
 - PII redaction enabled by default (`PII_REDACTION=true`)
 - Vector embeddings have 90-day TTL (`VECTOR_TTL_DAYS=90`)
 
+### Escrow Service DB Persistence
+
+The escrow service persists payment state to the `escrow_payments` table when `DATABASE_URL` is set. The state machine uses **DB-first lookups** for all operations — all four state transitions (`hold`, `release`, `dispute`, `refund`) call `get_escrow()` which queries the DB before falling back to the in-memory cache. This means escrow state survives service restarts.
+
+When `DATABASE_URL` is not set, the service operates in-memory only (suitable for development/testing without a database).
+
 ## Troubleshooting
 
 ### Services Won't Start
@@ -433,6 +591,18 @@ echo $BRIDGE_URL
 - Install all service dependencies first (`pip install -r requirements.txt`)
 - OR-Tools is optional - will use heuristic fallback if unavailable
 - Check `config/defaults.json` for simulation parameters
+
+### The Pulse Not Starting
+- Check `DATABASE_URL` is set in the matching service environment
+- Pulse skips silently if `DATABASE_URL` is absent — check logs for `⚠️ DATABASE_URL not set`
+- Verify `pulse_matches` table exists: `SELECT COUNT(*) FROM pulse_matches;`
+- Check Pulse status: `curl http://localhost:8003/pulse/status`
+
+### Docker Database Init Failures
+- Postgres image must be `postgis/postgis:15-3.4` (not `postgres:15-alpine`) for PostGIS support
+- Init scripts run in alphabetical order — `00_` before `01_` before `02_`
+- If schema already applied (volume exists), init scripts do NOT re-run — use `docker-compose down -v` to reset
+- `auth.users` FK errors mean `00_auth_stub.sql` didn't run first
 
 ## The Artery Principles: Quick Reference
 

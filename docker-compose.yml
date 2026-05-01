@@ -77,8 +77,11 @@ services:
       - "8003:8003"
     environment:
       - PORT=8003
+      - DATABASE_URL=postgresql://inc_user:inc_password@postgres:5432/inc_logistics
     volumes:
       - ./config:/app/config:ro
+    depends_on:
+      - postgres
     networks:
       - inc_network
 
@@ -91,6 +94,9 @@ services:
     environment:
       - PORT=8004
       - USE_REAL_STRIPE=false
+      - DATABASE_URL=postgresql://inc_user:inc_password@postgres:5432/inc_logistics
+    depends_on:
+      - postgres
     networks:
       - inc_network
 
@@ -108,9 +114,9 @@ services:
     networks:
       - inc_network
 
-  # PostgreSQL Database
+  # PostgreSQL Database (PostGIS image required for geospatial operations)
   postgres:
-    image: postgres:15-alpine
+    image: postgis/postgis:15-3.4
     environment:
       POSTGRES_DB: inc_logistics
       POSTGRES_USER: inc_user
@@ -119,7 +125,10 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./infra/docker/00_auth_stub.sql:/docker-entrypoint-initdb.d/00_auth_stub.sql
       - ./infra/supabase/new_tables.sql:/docker-entrypoint-initdb.d/01_new_tables.sql
+      - ./infra/supabase/pulse_matches.sql:/docker-entrypoint-initdb.d/02_pulse_matches.sql
+      - ./infra/supabase/service_providers.sql:/docker-entrypoint-initdb.d/03_service_providers.sql
     networks:
       - inc_network
 

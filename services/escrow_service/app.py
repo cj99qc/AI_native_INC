@@ -1,5 +1,3 @@
-# CREATE FILE: services/escrow_service/app.py
-
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List
@@ -8,6 +6,26 @@ from datetime import datetime, timezone
 import uuid
 import json
 import os
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    DB_AVAILABLE = True
+except ImportError:
+    DB_AVAILABLE = False
+
+
+def get_db_connection():
+    """Return a DB connection when DATABASE_URL is configured, else None."""
+    if not DB_AVAILABLE:
+        return None
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return None
+    try:
+        return psycopg2.connect(db_url, cursor_factory=RealDictCursor)
+    except Exception:
+        return None
 
 app = FastAPI(title="Escrow Service", version="1.0.0")
 
@@ -157,15 +175,174 @@ class MockStripeConnector:
 
 class EscrowStateMachine:
     """Escrow state machine for managing payment states"""
-    
+
     def __init__(self, stripe_connector: MockStripeConnector):
         self.stripe = stripe_connector
-        self.escrows: Dict[str, EscrowRecord] = {}
+        self.escrows: Dict[str, EscrowRecord] = {}  # in-memory fallback
+
+    # ------------------------------------------------------------------
+    # Private DB helpers — all silent-fail so in-memory always works
+    # ------------------------------------------------------------------
+
+    def _db_insert(self, escrow: EscrowRecord) -> bool:
+        """Persist a new escrow record to the database."""
+        conn = get_db_connection()
+        if not conn:
+            return False
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO escrow_payments (
+                        id, order_id, batch_id, customer_id, vendor_id, driver_id,
+                        amount_total_cents, amount_platform_fee_cents,
+                        amount_delivery_fee_cents, amount_driver_payout_cents,
+                        amount_vendor_payout_cents, status, payment_intent_id,
+                        metadata, created_at, updated_at
+                    ) VALUES (
+                        %s::uuid, %s::uuid, %s::uuid, %s::uuid, %s::uuid, %s::uuid,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                """, (
+                    escrow.id, escrow.order_id, escrow.batch_id,
+                    escrow.customer_id, escrow.vendor_id, escrow.driver_id,
+                    escrow.payment_breakdown.total_cents,
+                    escrow.payment_breakdown.platform_fee_cents,
+                    escrow.payment_breakdown.delivery_fee_cents,
+                    escrow.payment_breakdown.driver_payout_cents,
+                    escrow.payment_breakdown.vendor_payout_cents,
+                    escrow.status.value,
+                    escrow.payment_intent_id,
+                    json.dumps(escrow.metadata),
+                    escrow.created_at,
+                    escrow.created_at,
+                ))
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    def _db_update_status(self, escrow: EscrowRecord) -> bool:
+        """Update an existing escrow record's status and timestamps."""
+        conn = get_db_connection()
+        if not conn:
+            return False
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE escrow_payments SET
+                        status        = %s,
+                        held_at       = %s,
+                        released_at   = %s,
+                        disputed_at   = %s,
+                        refunded_at   = %s,
+                        dispute_reason = %s,
+                        metadata      = %s,
+                        updated_at    = NOW()
+                    WHERE id = %s::uuid
+                """, (
+                    escrow.status.value,
+                    escrow.held_at,
+                    escrow.released_at,
+                    escrow.disputed_at,
+                    escrow.refunded_at,
+                    escrow.metadata.get("dispute_reason"),
+                    json.dumps(escrow.metadata),
+                    escrow.id,
+                ))
+            conn.commit()
+            return True
+        except Exception:
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+
+    def _db_get(self, escrow_id: str) -> Optional[EscrowRecord]:
+        """Load an escrow record from the database."""
+        conn = get_db_connection()
+        if not conn:
+            return None
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, order_id, customer_id, vendor_id, driver_id, batch_id,
+                           status, payment_intent_id,
+                           amount_total_cents, amount_platform_fee_cents,
+                           amount_delivery_fee_cents, amount_driver_payout_cents,
+                           amount_vendor_payout_cents,
+                           held_at, released_at, disputed_at, refunded_at,
+                           metadata, created_at
+                    FROM escrow_payments WHERE id = %s::uuid
+                """, (escrow_id,))
+                row = cur.fetchone()
+            if not row:
+                return None
+            return self._row_to_record(row)
+        except Exception:
+            return None
+        finally:
+            conn.close()
+
+    def _db_list_by_order(self, order_id: str) -> List[EscrowRecord]:
+        """Load all escrow records for an order from the database."""
+        conn = get_db_connection()
+        if not conn:
+            return []
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, order_id, customer_id, vendor_id, driver_id, batch_id,
+                           status, payment_intent_id,
+                           amount_total_cents, amount_platform_fee_cents,
+                           amount_delivery_fee_cents, amount_driver_payout_cents,
+                           amount_vendor_payout_cents,
+                           held_at, released_at, disputed_at, refunded_at,
+                           metadata, created_at
+                    FROM escrow_payments WHERE order_id = %s::uuid
+                    ORDER BY created_at DESC
+                """, (order_id,))
+                return [self._row_to_record(r) for r in cur.fetchall()]
+        except Exception:
+            return []
+        finally:
+            conn.close()
+
+    def _row_to_record(self, row) -> EscrowRecord:
+        """Convert a DB row dict to an EscrowRecord."""
+        meta = row["metadata"] or {}
+        if isinstance(meta, str):
+            meta = json.loads(meta)
+        return EscrowRecord(
+            id=str(row["id"]),
+            order_id=str(row["order_id"]),
+            customer_id=str(row["customer_id"]),
+            vendor_id=str(row["vendor_id"]),
+            driver_id=str(row["driver_id"]) if row["driver_id"] else None,
+            batch_id=str(row["batch_id"]) if row["batch_id"] else None,
+            status=EscrowStatus(row["status"]),
+            payment_breakdown=PaymentBreakdown(
+                total_cents=row["amount_total_cents"],
+                platform_fee_cents=row["amount_platform_fee_cents"],
+                delivery_fee_cents=row["amount_delivery_fee_cents"],
+                driver_payout_cents=row["amount_driver_payout_cents"],
+                vendor_payout_cents=row["amount_vendor_payout_cents"],
+            ),
+            payment_intent_id=row["payment_intent_id"],
+            created_at=row["created_at"],
+            held_at=row["held_at"],
+            released_at=row["released_at"],
+            disputed_at=row["disputed_at"],
+            refunded_at=row["refunded_at"],
+            metadata=meta,
+        )
     
     def create_escrow(self, request: EscrowRequest) -> EscrowRecord:
         """Create a new escrow record"""
         escrow_id = str(uuid.uuid4())
-        
+
         escrow = EscrowRecord(
             id=escrow_id,
             order_id=request.order_id,
@@ -183,16 +360,16 @@ class EscrowStateMachine:
             refunded_at=None,
             metadata={}
         )
-        
-        self.escrows[escrow_id] = escrow
+
+        self._db_insert(escrow)          # persist to DB (silent-fail)
+        self.escrows[escrow_id] = escrow  # always keep in-memory
         return escrow
     
     def hold_funds(self, escrow_id: str) -> Dict[str, Any]:
         """Transition from PENDING to HELD"""
-        if escrow_id not in self.escrows:
+        escrow = self.get_escrow(escrow_id)
+        if not escrow:
             raise ValueError(f"Escrow {escrow_id} not found")
-        
-        escrow = self.escrows[escrow_id]
         
         if escrow.status != EscrowStatus.PENDING:
             raise ValueError(f"Cannot hold funds for escrow in status {escrow.status}")
@@ -207,16 +384,16 @@ class EscrowStateMachine:
             escrow.status = EscrowStatus.HELD
             escrow.held_at = datetime.now(timezone.utc)
             escrow.metadata.update(hold_result)
+            self._db_update_status(escrow)
             return {"success": True, "escrow": escrow}
         else:
             return {"success": False, "error": hold_result.get("error", "Unknown error")}
     
     def release_funds(self, escrow_id: str, completion_notes: Optional[str] = None) -> Dict[str, Any]:
         """Transition from HELD to RELEASED"""
-        if escrow_id not in self.escrows:
+        escrow = self.get_escrow(escrow_id)
+        if not escrow:
             raise ValueError(f"Escrow {escrow_id} not found")
-        
-        escrow = self.escrows[escrow_id]
         
         if escrow.status != EscrowStatus.HELD:
             raise ValueError(f"Cannot release funds for escrow in status {escrow.status}")
@@ -233,17 +410,17 @@ class EscrowStateMachine:
             if completion_notes:
                 escrow.metadata["completion_notes"] = completion_notes
             escrow.metadata.update(release_result)
+            self._db_update_status(escrow)
             return {"success": True, "escrow": escrow}
         else:
             return {"success": False, "error": release_result.get("error", "Unknown error")}
     
-    def dispute_funds(self, escrow_id: str, dispute_reason: str, 
+    def dispute_funds(self, escrow_id: str, dispute_reason: str,
                      disputed_by: str, dispute_notes: Optional[str] = None) -> Dict[str, Any]:
         """Transition from HELD to DISPUTED"""
-        if escrow_id not in self.escrows:
+        escrow = self.get_escrow(escrow_id)
+        if not escrow:
             raise ValueError(f"Escrow {escrow_id} not found")
-        
-        escrow = self.escrows[escrow_id]
         
         if escrow.status != EscrowStatus.HELD:
             raise ValueError(f"Cannot dispute escrow in status {escrow.status}")
@@ -255,16 +432,15 @@ class EscrowStateMachine:
             "disputed_by": disputed_by,
             "dispute_notes": dispute_notes
         })
-        
+        self._db_update_status(escrow)
         return {"success": True, "escrow": escrow}
     
-    def refund_funds(self, escrow_id: str, refund_reason: str, 
+    def refund_funds(self, escrow_id: str, refund_reason: str,
                     partial_amount_cents: Optional[int] = None) -> Dict[str, Any]:
         """Refund funds to customer"""
-        if escrow_id not in self.escrows:
+        escrow = self.get_escrow(escrow_id)
+        if not escrow:
             raise ValueError(f"Escrow {escrow_id} not found")
-        
-        escrow = self.escrows[escrow_id]
         
         if escrow.status not in [EscrowStatus.HELD, EscrowStatus.DISPUTED]:
             raise ValueError(f"Cannot refund escrow in status {escrow.status}")
@@ -285,16 +461,24 @@ class EscrowStateMachine:
                 "refund_amount_cents": refund_amount,
                 **refund_result
             })
+            self._db_update_status(escrow)
             return {"success": True, "escrow": escrow}
         else:
             return {"success": False, "error": refund_result.get("error", "Unknown error")}
     
     def get_escrow(self, escrow_id: str) -> Optional[EscrowRecord]:
-        """Get escrow by ID"""
+        """Get escrow by ID — DB first, in-memory fallback"""
+        record = self._db_get(escrow_id)
+        if record:
+            self.escrows[escrow_id] = record  # sync cache
+            return record
         return self.escrows.get(escrow_id)
-    
+
     def list_escrows_by_order(self, order_id: str) -> List[EscrowRecord]:
-        """List all escrows for an order"""
+        """List all escrows for an order — DB first, in-memory fallback"""
+        records = self._db_list_by_order(order_id)
+        if records:
+            return records
         return [e for e in self.escrows.values() if e.order_id == order_id]
 
 # Initialize services

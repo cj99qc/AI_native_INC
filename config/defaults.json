@@ -36,5 +36,11 @@
     "embedding_dim": 384,
     "top_k_results": 5,
     "similarity_threshold": 0.7
+  },
+  "pulse": {
+    "scan_interval_seconds": 30,
+    "match_expiry_minutes": 15,
+    "max_distance_km": 50.0,
+    "min_match_score": 0.3
   }
 }

@@ -120,6 +120,19 @@ app.post('/api/matching/simulate_acceptance', async (req, res) => {
   res.status(result.status).json(result.success ? result.data : { error: result.error });
 });
 
+// Service discovery endpoint — proxies query params as-is to matching service
+app.get('/api/matching/availability', async (req, res) => {
+  const query = new URLSearchParams(req.query).toString();
+  const result = await proxyRequest(SERVICES.matching, `/availability?${query}`, 'GET');
+  res.status(result.status).json(result.success ? result.data : { error: result.error });
+});
+
+// The Pulse: background worker status and pre-computed match count
+app.get('/api/matching/pulse/status', async (req, res) => {
+  const result = await proxyRequest(SERVICES.matching, '/pulse/status', 'GET');
+  res.status(result.status).json(result.success ? result.data : { error: result.error });
+});
+
 // Escrow service endpoints
 app.post('/api/escrow/hold', async (req, res) => {
   const result = await proxyRequest(SERVICES.escrow, '/hold_funds', 'POST', req.body);
@@ -133,6 +146,17 @@ app.post('/api/escrow/release', async (req, res) => {
 
 app.post('/api/escrow/dispute', async (req, res) => {
   const result = await proxyRequest(SERVICES.escrow, '/dispute', 'POST', req.body);
+  res.status(result.status).json(result.success ? result.data : { error: result.error });
+});
+
+app.post('/api/escrow/refund', async (req, res) => {
+  const result = await proxyRequest(SERVICES.escrow, '/refund', 'POST', req.body);
+  res.status(result.status).json(result.success ? result.data : { error: result.error });
+});
+
+// More specific route must come before the generic /:escrowId catch-all
+app.get('/api/escrow/order/:orderId', async (req, res) => {
+  const result = await proxyRequest(SERVICES.escrow, `/order/${req.params.orderId}/escrows`, 'GET');
   res.status(result.status).json(result.success ? result.data : { error: result.error });
 });
 

@@ -22,18 +22,19 @@ import {
   Cell,
   Legend
 } from 'recharts'
-import { 
-  Users, 
-  Store, 
-  Truck, 
-  Package, 
+import {
+  Users,
+  Store,
+  Truck,
+  Package,
   DollarSign,
   TrendingUp,
   Activity,
   ShoppingCart,
   BarChart3,
   Eye,
-  AlertCircle
+  AlertCircle,
+  LifeBuoy,
 } from 'lucide-react'
 import Link from 'next/link'
 
@@ -286,6 +287,12 @@ export default function AdminDashboard() {
             <Button variant="outline">
               <TrendingUp className="h-4 w-4 mr-2" />
               Sponsored Listings
+            </Button>
+          </Link>
+          <Link href="/admin/support">
+            <Button variant="outline">
+              <LifeBuoy className="h-4 w-4 mr-2" />
+              Support Queue
             </Button>
           </Link>
         </div>

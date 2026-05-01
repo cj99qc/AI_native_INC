@@ -1,6 +1,6 @@
 # CREATE FILE: services/matching_service/app.py
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
@@ -29,6 +29,9 @@ def load_config():
 
 config = load_config()
 random.seed(config.get("seed", 42))
+
+# The Pulse worker
+pulse_worker_task = None
 
 # Database connection helper
 def get_db_connection():
@@ -499,6 +502,421 @@ async def simulate_acceptance(request: AcceptanceRequest):
 async def get_matching_config():
     """Get current matching configuration"""
     return config
+
+# ============================================================================
+# SERVICE DISCOVERY: GET /availability
+# Completely decoupled from The Pulse — queries service_providers table only.
+# No interaction with pulse_worker or the driver-matching pipeline.
+# ============================================================================
+
+class ServiceOffering(BaseModel):
+    id: str
+    display_name: str
+    description: Optional[str]
+    price_strategy: str
+    base_price_cents: Optional[int]
+    hourly_rate_cents: Optional[int]
+
+class ServiceProviderResult(BaseModel):
+    id: str
+    name: str
+    service_type: Optional[str]  # Deprecated, kept for backwards compat
+    description: Optional[str]
+    contact_info: Optional[Dict[str, Any]]
+    distance_km: float
+    services: List[ServiceOffering] = []  # New: services offered by this provider
+
+class ServiceRecommendation(BaseModel):
+    id: str
+    name: str
+    service_type: Optional[str]
+    distance_km: float
+    message: str
+
+class AvailabilityResponse(BaseModel):
+    providers: List[ServiceProviderResult]
+    count: int
+    message: str
+    recommendation: Optional[ServiceRecommendation]
+
+@app.get("/availability", response_model=AvailabilityResponse)
+async def get_availability(
+    service: Optional[str] = Query(None, description="Service slug (new)"),
+    service_type: Optional[str] = Query(None, description="Deprecated: service_type (old)"),
+    lat: float = Query(..., ge=-90, le=90),
+    lng: float = Query(..., ge=-180, le=180),
+    radius_km: float = Query(20.0, ge=0.1, le=500.0),
+):
+    """
+    Find active service providers near a location using PostGIS ST_DWithin.
+
+    Supports new service_slug parameter and legacy service_type for backwards compat.
+    Returns providers with their offered services, pricing, and distance.
+
+    If no providers are found within radius_km, a recommendation field returns
+    the nearest active provider outside the radius (InC Psychology: never
+    return an empty list without a next step).
+    """
+    # Backwards compatibility: service_type param is an alias for service slug
+    search_service = service or service_type
+    if not search_service:
+        raise HTTPException(
+            status_code=400,
+            detail="Must provide either 'service' or 'service_type' parameter"
+        )
+
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection unavailable"
+        )
+
+    try:
+        radius_m = radius_km * 1000  # ST_DWithin uses metres for GEOGRAPHY
+
+        with conn.cursor() as cur:
+            # Primary query: active providers with matching services within radius
+            cur.execute("""
+                SELECT DISTINCT
+                    sp.id::text,
+                    sp.name,
+                    sp.service_type,
+                    sp.description,
+                    sp.contact_info,
+                    ST_Distance(
+                        sp.location,
+                        ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+                    ) / 1000.0 AS distance_km
+                FROM service_providers sp
+                INNER JOIN provider_services ps ON sp.id = ps.provider_id
+                WHERE sp.is_active = true
+                  AND ps.is_active = true
+                  AND ps.service_slug = %s
+                  AND ST_DWithin(
+                        sp.location,
+                        ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
+                        %s
+                  )
+                ORDER BY distance_km ASC
+            """, (lng, lat, search_service, lng, lat, radius_m))
+
+            provider_rows = cur.fetchall()
+
+            # For each provider, fetch their services for this category
+            providers_dict = {}
+            for row in provider_rows:
+                provider_id = row["id"]
+                if provider_id not in providers_dict:
+                    providers_dict[provider_id] = {
+                        "id": provider_id,
+                        "name": row["name"],
+                        "service_type": row["service_type"],
+                        "description": row["description"],
+                        "contact_info": row["contact_info"],
+                        "distance_km": round(float(row["distance_km"]), 2),
+                        "services": []
+                    }
+
+            # Fetch services for these providers
+            if providers_dict:
+                provider_ids = list(providers_dict.keys())
+                placeholders = ','.join(['%s'] * len(provider_ids))
+                cur.execute(f"""
+                    SELECT
+                        id::text,
+                        provider_id::text,
+                        display_name,
+                        description,
+                        price_strategy,
+                        base_price_cents,
+                        hourly_rate_cents
+                    FROM provider_services
+                    WHERE provider_id = ANY(ARRAY[{placeholders}]::uuid[])
+                      AND service_slug = %s
+                      AND is_active = true
+                """, provider_ids + [search_service])
+
+                for service_row in cur.fetchall():
+                    provider_id = service_row["provider_id"]
+                    if provider_id in providers_dict:
+                        providers_dict[provider_id]["services"].append(
+                            ServiceOffering(
+                                id=service_row["id"],
+                                display_name=service_row["display_name"],
+                                description=service_row["description"],
+                                price_strategy=service_row["price_strategy"],
+                                base_price_cents=service_row["base_price_cents"],
+                                hourly_rate_cents=service_row["hourly_rate_cents"],
+                            )
+                        )
+
+        providers = [
+            ServiceProviderResult(
+                id=p["id"],
+                name=p["name"],
+                service_type=p["service_type"],
+                description=p["description"],
+                contact_info=p["contact_info"],
+                distance_km=p["distance_km"],
+                services=p["services"],
+            )
+            for p in providers_dict.values()
+        ]
+
+        # InC Psychology: never leave the user with nothing to act on
+        recommendation = None
+        if not providers:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        id::text,
+                        name,
+                        service_type,
+                        ST_Distance(
+                            location,
+                            ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
+                        ) / 1000.0 AS distance_km
+                    FROM service_providers
+                    WHERE is_active = true
+                      AND service_type = %s
+                    ORDER BY distance_km ASC
+                    LIMIT 1
+                """, (lng, lat, service_type))
+                nearest = cur.fetchone()
+
+            if nearest:
+                dist = round(float(nearest["distance_km"]), 1)
+                recommendation = ServiceRecommendation(
+                    id=nearest["id"],
+                    name=nearest["name"],
+                    service_type=nearest["service_type"],
+                    distance_km=dist,
+                    message=f"{nearest['name']} is {dist}km away — closest available"
+                )
+                message = (
+                    f"No providers within {radius_km}km — "
+                    f"here's your nearest option"
+                )
+            else:
+                message = f"No {service_type} providers available right now"
+        else:
+            count = len(providers)
+            message = (
+                f"{count} provider{'s' if count != 1 else ''} near you — ready to help"
+            )
+
+        return AvailabilityResponse(
+            providers=providers,
+            count=len(providers),
+            message=message,
+            recommendation=recommendation,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Availability search failed: {str(e)}"
+        )
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# THE PULSE: Autonomous Background Matching
+# ============================================================================
+
+class PulseMatch(BaseModel):
+    """Pre-computed match from The Pulse"""
+    id: str
+    driver_id: str
+    batch_id: str
+    match_score: float
+    distance_km: float
+    artery_score: Optional[float]
+    trajectory_score: Optional[float]
+    capacity_utilization: float
+    estimated_acceptance_probability: float
+    suggested_at: datetime
+    expires_at: Optional[datetime]
+
+class PulseMatchesResponse(BaseModel):
+    """Response containing pulse matches"""
+    matches: List[PulseMatch]
+    count: int
+    message: str
+
+@app.on_event("startup")
+async def startup_event():
+    """Start The Pulse background worker on service startup"""
+    global pulse_worker_task
+
+    # Only start if DATABASE_URL is configured
+    if not os.getenv("DATABASE_URL"):
+        print("⚠️  DATABASE_URL not set - Pulse worker will not start")
+        return
+
+    try:
+        from pulse_worker import init_pulse_worker
+        import asyncio
+
+        worker = init_pulse_worker(config, matching_engine)
+        pulse_worker_task = asyncio.create_task(worker.start())
+        print("🩸 The Pulse is alive - autonomous matching enabled")
+    except Exception as e:
+        print(f"⚠️  Could not start Pulse worker: {str(e)}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop The Pulse background worker on service shutdown"""
+    global pulse_worker_task
+
+    if pulse_worker_task:
+        try:
+            from pulse_worker import get_pulse_worker
+            worker = get_pulse_worker()
+            if worker:
+                worker.stop()
+            pulse_worker_task.cancel()
+            print("🛑 The Pulse has stopped")
+        except Exception as e:
+            print(f"⚠️  Error stopping Pulse worker: {str(e)}")
+
+@app.get("/pulse/matches", response_model=PulseMatchesResponse)
+async def get_pulse_matches(
+    driver_id: Optional[str] = None,
+    batch_id: Optional[str] = None,
+    min_score: float = 0.0,
+    limit: int = 10
+):
+    """
+    Get pre-computed pulse matches (The Pulse - anticipatory matching)
+
+    Returns matches that have been autonomously computed by the background worker.
+    No need to wait for matching - results are instant!
+
+    Query params:
+    - driver_id: Filter by specific driver
+    - batch_id: Filter by specific batch
+    - min_score: Minimum match score (0.0 to 1.0)
+    - limit: Maximum number of matches to return
+    """
+    try:
+        conn = get_db_connection()
+        if not conn:
+            raise HTTPException(
+                status_code=503,
+                detail="Database connection unavailable"
+            )
+
+        with conn.cursor() as cur:
+            # Build query based on filters
+            query = """
+                SELECT
+                    id, driver_id, batch_id, match_score, distance_km,
+                    artery_score, trajectory_score, capacity_utilization,
+                    estimated_acceptance_probability, suggested_at, expires_at
+                FROM pulse_matches
+                WHERE is_active = true
+                    AND expires_at > NOW()
+                    AND match_score >= %s
+            """
+            params = [min_score]
+
+            if driver_id:
+                query += " AND driver_id = %s"
+                params.append(driver_id)
+
+            if batch_id:
+                query += " AND batch_id = %s"
+                params.append(batch_id)
+
+            query += " ORDER BY match_score DESC LIMIT %s"
+            params.append(limit)
+
+            cur.execute(query, params)
+            results = cur.fetchall()
+
+            matches = [
+                PulseMatch(
+                    id=str(row['id']),
+                    driver_id=str(row['driver_id']),
+                    batch_id=str(row['batch_id']),
+                    match_score=float(row['match_score']),
+                    distance_km=float(row['distance_km']),
+                    artery_score=float(row['artery_score']) if row['artery_score'] else None,
+                    trajectory_score=float(row['trajectory_score']) if row['trajectory_score'] else None,
+                    capacity_utilization=float(row['capacity_utilization']),
+                    estimated_acceptance_probability=float(row['estimated_acceptance_probability']),
+                    suggested_at=row['suggested_at'],
+                    expires_at=row['expires_at']
+                )
+                for row in results
+            ]
+
+            conn.close()
+
+            return PulseMatchesResponse(
+                matches=matches,
+                count=len(matches),
+                message=f"Found {len(matches)} pulse matches - decisions made easy"
+            )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch pulse matches: {str(e)}")
+
+@app.get("/pulse/status")
+async def get_pulse_status():
+    """
+    Get The Pulse worker status
+
+    Returns information about the background matching worker
+    """
+    from pulse_worker import get_pulse_worker
+
+    worker = get_pulse_worker()
+
+    if not worker:
+        return {
+            "running": False,
+            "message": "Pulse worker not initialized"
+        }
+
+    try:
+        conn = get_db_connection()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        COUNT(*) as total_matches,
+                        COUNT(*) FILTER (WHERE is_active = true) as active_matches,
+                        MAX(suggested_at) as last_match_time
+                    FROM pulse_matches
+                """)
+                stats = cur.fetchone()
+                conn.close()
+
+                return {
+                    "running": worker.running,
+                    "scan_interval_seconds": worker.scan_interval_seconds,
+                    "match_expiry_minutes": worker.match_expiry_minutes,
+                    "total_matches": stats['total_matches'] if stats else 0,
+                    "active_matches": stats['active_matches'] if stats else 0,
+                    "last_match_time": stats['last_match_time'] if stats else None,
+                    "message": "The Pulse is alive - anticipating matches continuously"
+                }
+        else:
+            return {
+                "running": worker.running,
+                "message": "Database connection unavailable"
+            }
+    except Exception as e:
+        return {
+            "running": worker.running if worker else False,
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn
