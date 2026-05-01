@@ -1,14 +1,38 @@
 ---
 name: INC Platform Build Progress
-description: Step 2 (Product Catalog) complete. Step 3 (Multi-Service Providers) 90% complete with schema, API routes, and UI pages. Ready for Step 4 (LLM Search).
+description: Steps 1, 2, 3 complete and reviewed. Step 3 had 7 categories of bugs from the initial Haiku build; all fixed by Opus 4.7 in a follow-up review pass. Ready for Step 4 (LLM Search).
 type: project
 ---
 
 # INC Platform Build Progress
 
-**Status:** Step 2 Complete, Step 3 In Progress (90% → final testing phase)  
+**Status:** Step 2 Complete, Step 3 Complete (with review fixes applied)  
 **Last Session:** 2026-05-01  
-**Next Action:** Final integration test of Step 3, then move to Step 4 (LLM Search)
+**Next Action:** Start Step 4 (Unified LLM Search)
+
+---
+
+## Step 3 Review Pass — What the Initial Build Got Wrong
+
+Step 3 was originally built by Haiku 4.5 in a single pass: schema, API, UI, matching service all written quickly. A subsequent review by Opus 4.7 found seven distinct categories of bugs that would have prevented the system from working in production.
+
+The most critical was a schema-sync issue — Haiku added the new tables to `infra/supabase/master_schema.sql` and `infra/supabase/service_providers.sql` but never to `inc/supabase/schema.sql`, which is the file the Next.js Supabase project actually applies. So the live database had no Step 3 tables at all. Every API call would have hit "relation does not exist" 500 errors. The fix added the three tables (`service_providers`, `service_categories`, `provider_services`) to the correct schema file along with all RLS policies, indices, the `update_updated_at_column` trigger, and a CHECK constraint enforcing pricing-strategy consistency at the DB level. A backfill query was also added so existing rows with the deprecated `service_type` column get a placeholder `provider_services` row automatically.
+
+The second critical bug was a currency UX disaster. The provider services form labeled the price field "Base Price (₹)" but stored the value as `base_price_cents` and instructed users to enter paise. A provider typing "80" thinking 80 rupees would have been stored as 80 paise = ₹0.80. **Every provider on the platform would have priced 100× lower than intended.** The fix renamed the form fields to `base_price_rupees` / `hourly_rate_rupees`, accepts decimal input with `step="0.01"`, multiplies by 100 in the submit handler before sending to the API, and divides by 100 when loading existing data for display.
+
+A third bug was that the PATCH endpoint silently dropped category changes. The `UPDATE_SERVICE_SCHEMA` Zod object did not include `service_slug`, so a user changing their service category from "plumber" to "electrician" would see the dropdown change but the field would never reach the database. The fix added `service_slug` to the schema, the `updateData` mapping, and added a pre-validation step that confirms the slug exists in `service_categories` before attempting the update — so users get a clear "Unknown service category: X" error instead of a generic FK violation.
+
+The matching service had a bug specific to the new `service` query parameter. Haiku had introduced a `search_service = service or service_type` resolution at the top of the endpoint, but the fallback recommendation query at the bottom still referenced the raw `service_type` variable. When a caller passed `?service=plumber`, the fallback would search for `service_type IS NULL` and return an empty result with the message "No None providers available right now". The fix uses `search_service` everywhere, and replaces the fallback's direct query of the deprecated `service_providers.service_type` column with a LEFT JOIN through `provider_services` so providers registered through the new system also appear in fallback recommendations.
+
+The "open now" badge had a timezone bug. The `isOpenNow(hours, timezone)` function accepted a `timezone` parameter but never used it — instead computing against the server's local time. A provider in Asia/Kolkata whose hours said "Mon 09:00–18:00" would show "Closed" if the server was in UTC at 4 AM IST (which is 22:30 UTC the previous day, also a different weekday). The fix uses `Intl.DateTimeFormat` with the `timeZone` option to derive the provider-local weekday and time. It also handles overnight ranges (e.g. a bar open 18:00–02:00 next day), and returns `null` for unknown hours so the UI hides the badge instead of showing a misleading "Closed".
+
+The discovery page at `/services/[slug]` had two issues. First, the Supabase join filter `.eq('provider.is_active', true)` doesn't actually constrain the joined table without the `!inner` annotation — so inactive providers' services would have appeared. Second, the page hardcoded "Near you" and "4.8 (24 reviews)" next to each provider — fake data that lies to users since there's no PostGIS distance computation and no reviews system yet (Step 6). The fix adds `!inner`, removes the placeholder strings, and refactors the matching service query to use JSON aggregation (`jsonb_agg ... FILTER WHERE`) so it returns each provider with their services in a single query instead of a DISTINCT + N+1 fetch loop.
+
+The seventh fix consolidated several form-level issues. The frontend Zod schema didn't enforce description max-length (1000 chars) but the API did, leading to a poor UX where users typed too much, saw no error, and got a server rejection. The form's submit handler ran service updates sequentially with `await` in a for-loop, so 10 services meant 10 round-trips and any mid-loop failure left an inconsistent state. The success path used `window.location.reload()` which destroys React state. All of these were fixed: Zod schemas synchronized between client and API, sequential awaits replaced with `Promise.allSettled` plus per-row error reporting, and `router.refresh()` replaces the full page reload.
+
+A few bonus issues surfaced during the type-check pass. The Step 2 product forms had a similar `useForm<ProductFormData>` type-mismatch where `z.infer` flattens defaults into required fields but the resolver expects the input type with optional defaults. The fix uses `z.input` and `z.output` separately and passes both as generics: `useForm<Input, unknown, Output>`. The `embeddings.ts` file imported `openai` from `./openai` but that module exports a `getOpenAI()` factory, not a default instance — fixed by calling `getOpenAI()` inside the embedding function. And the `@hookform/resolvers` package was missing from `package.json` entirely despite being used across all forms — added via `npm install`.
+
+After all fixes: `npx tsc --noEmit` runs clean, Python syntax validates, and the SQL is structurally sound. Manual integration testing still requires the schema to be applied to the Supabase project and the matching service running, but every code path that was previously broken now has a clear correctness story.
 
 ---
 

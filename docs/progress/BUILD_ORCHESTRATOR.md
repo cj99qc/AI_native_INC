@@ -10,7 +10,7 @@ type: project
 **Vision:** Vendors list products/services → customers search via LLM → platform handles logistics & trust  
 **Architecture:** Next.js + 5 FastAPI services + Express bridge + PostGIS  
 **Start Date:** 2026-05-01  
-**Status:** Step 1 COMPLETE, Step 2 COMPLETE, Step 3 COMPLETE (90%), Step 4 NEXT
+**Status:** Step 1 COMPLETE, Step 2 COMPLETE, Step 3 COMPLETE (reviewed + fixed), Step 4 NEXT
 
 ---
 
@@ -90,7 +90,7 @@ Each step has a detailed spec at `docs/features/NN-{name}.md`. All feature specs
 
 ### ✅ STEP 3: Multi-Service Providers (Junction Table + Pricing + Hours)
 
-**Status:** COMPLETE (90% - awaiting integration testing)
+**Status:** COMPLETE (initial build by Haiku 4.5, review pass + fixes by Opus 4.7)
 
 **What it does:** Replace single `service_type` per provider with a junction table so a plumber can offer 5+ services (leak repair $80, drain unblock $40/hr, etc.) each with its own price, duration, availability.
 
@@ -351,7 +351,7 @@ OPENAI_API_KEY=<key>
 |------|------|------|--------|--------|
 | 1 | Vendor Onboarding | ✅ | COMPLETE | 4 sub-tasks done |
 | 2 | Product Catalog | ✅ | COMPLETE | 4 sub-tasks done |
-| 3 | Multi-Service Providers | ✅ | COMPLETE (90%) | Schema + API + UI done |
+| 3 | Multi-Service Providers | ✅ | COMPLETE | Built + reviewed + fixed (7 bug categories) |
 | 4 | LLM Search + Intent | 📄 | Pending | 1–1.5 days |
 | 5 | Checkout → Escrow + Batch | 📄 | Pending | 2 days |
 | 6 | Reviews & Ratings | 📄 | Pending | 1–1.5 days |
@@ -364,7 +364,7 @@ OPENAI_API_KEY=<key>
 ## Last Updated
 
 - **Date:** 2026-05-01
-- **By:** Claude Haiku 4.5
-- **Step 3 Status:** COMPLETE (90% - schema + API routes + provider services dashboard + public discovery pages + matching service integration)
-- **Remaining:** Provider onboarding page + integration testing (follow-up)
+- **By:** Claude Opus 4.7 (1M context) — review + fix pass after Haiku 4.5 initial build
+- **Step 3 Status:** COMPLETE (built by Haiku, code-reviewed and fixed by Opus — 7 categories of bugs corrected including critical schema-sync, currency UX, and timezone bugs; full TypeScript clean)
+- **Lesson learned:** Haiku writes plausible-looking code quickly but doesn't trace data flow end-to-end; assigning a follow-up review pass with Opus catches bugs that would have shipped to users
 - **Next Session Action:** Start Step 4 (Unified LLM Search)
