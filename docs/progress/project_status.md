@@ -1,14 +1,42 @@
 ---
 name: INC Platform Build Progress
-description: Steps 1, 2, 3 complete and reviewed. Step 3 had 7 categories of bugs from the initial Haiku build; all fixed by Opus 4.7 in a follow-up review pass. Ready for Step 4 (LLM Search).
+description: Steps 1–4 complete. Step 3 included a review pass that caught and fixed 7 bug categories. Step 4 (Unified LLM Search) built end-to-end by Opus with intent classification and goal decomposition. Ready for Step 5 (Checkout → Escrow + Batch).
 type: project
 ---
 
 # INC Platform Build Progress
 
-**Status:** Step 2 Complete, Step 3 Complete (with review fixes applied)  
+**Status:** Steps 1, 2, 3, 4 Complete  
 **Last Session:** 2026-05-01  
-**Next Action:** Start Step 4 (Unified LLM Search)
+**Next Action:** Start Step 5 (Wire checkout → escrow + batch + driver match)
+
+---
+
+## Step 4 — Unified LLM Search (COMPLETE)
+
+Step 4 was built end-to-end by Opus 4.7 directly (no Haiku draft) with self-review along the way, since the architectural decisions for the search system are dense and stacking them up cleanly matters more than raw output speed.
+
+The goal was to make the single search bar answer three different kinds of queries through one endpoint. A direct product query like "flour" should hit the products table semantically. A direct service query like "I need a plumber" should hit the matching service. And a goal-oriented query like "I want to bake a cake" is the most interesting case — the platform should decompose the goal into a shopping list (flour, sugar, eggs, butter, baking powder), search each one in parallel, and surface the results grouped by component. This is what makes the marketplace feel like it's doing the heavy lifting rather than asking the user to do six searches manually.
+
+The architecture has four layers. At the top, `/api/search/unified` is the orchestrator: it takes `{query, lat, lng, radius_km}`, runs a rate-limit check, fetches the allowed service slugs from `service_categories`, calls the intent classifier, fans out all component searches via `Promise.all`, builds an anticipatory top-line message, and logs telemetry to `search_events` as fire-and-forget so the response is never blocked on the database write.
+
+The intent classifier in `lib/search/intent.ts` is the brain. It calls `gpt-4o-mini` with `response_format: {type: 'json_object'}`, a system prompt that explains the four intent classes, and four hardcoded few-shot examples (one per intent). The output is parsed through Zod and several defensive checks: if the LLM returns a `service_slug` that isn't in the enum, the slug is nulled and the intent is demoted; if a `product` intent has no components, the original query becomes the component; if a `service` intent has no slug, it's downgraded to `unknown`. When the LLM call itself fails or returns malformed JSON, the function falls back to treating the query as a plain product search so the user always gets something back. An in-memory LRU cache (1-hour TTL, 500 entries) prevents charging OpenAI for repeated queries within the same process — the same query twice in a session skips the network call entirely.
+
+The product search in `lib/search/products.ts` is one round-trip: embed the term via `text-embedding-3-small`, then call a new `match_products_nearby` RPC that combines pgvector cosine similarity with PostGIS `ST_DWithin` in a single query. This replaces the old N+1 pattern in the existing semantic route where each candidate was checked individually for proximity. The RPC also respects the per-vendor `availability_radius_km` so vendors who explicitly want a smaller delivery radius are honored. If zero hits land within the radius, the function does a second wider RPC call (50 km cap, reusing the same embedding) to compute an "expansion" hint — the nearest match's distance and a suggested radius that would surface it. After the search, vendor names are looked up once for the result set rather than per-row.
+
+The service search in `lib/search/services.ts` is thin: it calls the existing matching service `/availability` endpoint via the API bridge with a 3-second timeout. The matching service already does PostGIS distance filtering, returns providers grouped with their offerings, and includes a `recommendation` for the nearest provider outside the radius. If the matching service is down or slow, the search returns an empty result with a graceful "service search temporarily unavailable" message rather than failing the whole response — important because in a goal query, one component failure shouldn't kill the rest.
+
+The schema added a `search_events` table with telemetry fields (intent, components JSONB, latency_ms, num_results, cache_hit) and indices on `(user_id, created_at)` and `(intent, created_at)` so future queries to "what are the most common goal queries this week" run fast. RLS allows users to read their own search history, admins to read all, and permissive insert for both authenticated and anonymous traffic since search is public.
+
+The search page UI was rewritten to render the new response shape. The structure is: search bar at the top, optional location warning if the browser denied geolocation (defaults to Pune coords), a top-line anticipatory message keyed by intent ("You'll need 5 things — we found vendors for all of them"), an optional expansion-suggestion CTA banner when items lie just outside the radius, then a services section followed by a products section. For goal queries, products are grouped by component term with the term shown as a section header; a goal query for "bake a cake" with all five components found shows five labeled rows of results. For product queries with one component, the grouping is hidden and results render as a flat grid. Empty components show a "no flour within 5 km — nearest is 7.3 km away" message rather than just disappearing.
+
+Defensive design throughout: query length is capped at 500 characters, slug fuzzy matching for goal-implied services uses exact-match-first then token-match (so "ap" cannot match `appliance_repair`), the matching service has a 3-second abort signal, telemetry is fire-and-forget, and the OpenAI call uses `temperature: 0.0` for determinism. The final state passes `npx tsc --noEmit` clean and Next.js `npm run build` produces all routes including `/api/search/unified` and `/search`.
+
+What's deferred to follow-ups: voice input wiring (button is stubbed), personalized ranking based on past purchases (needs purchase history first), multi-language queries (Hindi/Marathi), and saved searches UI. The telemetry table exists but no UI consumes it yet — that's a Step 6+ analytics page when reviews data is also available.
+
+---
+
+## Step 3 Review Pass — What the Initial Build Got Wrong
 
 ---
 
