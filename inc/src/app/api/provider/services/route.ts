@@ -5,16 +5,12 @@ import { createServerSupabase } from '@/lib/supabase/server'
 const CREATE_SERVICE_SCHEMA = z.object({
   service_slug: z.string().min(1, 'Service category required'),
   display_name: z.string().min(1, 'Service name required').max(200),
-  description: z.string().max(1000).optional(),
+  description: z.string().max(1000).nullable().optional(),
   price_strategy: z.enum(['flat', 'hourly', 'quote']),
-  base_price_cents: z.number().int().min(0).optional(),
-  hourly_rate_cents: z.number().int().min(0).optional(),
-  min_charge_cents: z.number().int().min(0).optional(),
-  estimated_duration_minutes: z.number().int().min(0).optional(),
-})
-
-const UPDATE_SERVICE_SCHEMA = CREATE_SERVICE_SCHEMA.partial().extend({
-  is_active: z.boolean().optional(),
+  base_price_cents: z.number().int().min(0).nullable().optional(),
+  hourly_rate_cents: z.number().int().min(0).nullable().optional(),
+  min_charge_cents: z.number().int().min(0).nullable().optional(),
+  estimated_duration_minutes: z.number().int().min(0).nullable().optional(),
 })
 
 /**
@@ -61,16 +57,29 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // Validate price_strategy and required price fields
-  if (input.price_strategy === 'flat' && !input.base_price_cents) {
+  // Pre-validate service_slug to give a clear error rather than a generic FK violation.
+  const { data: category } = await supabase
+    .from('service_categories')
+    .select('slug')
+    .eq('slug', input.service_slug)
+    .maybeSingle()
+  if (!category) {
     return NextResponse.json(
-      { error: 'invalid_request', message: 'Flat-rate services require base_price_cents' },
+      { error: 'invalid_request', message: `Unknown service category: ${input.service_slug}` },
       { status: 400 }
     )
   }
-  if (input.price_strategy === 'hourly' && !input.hourly_rate_cents) {
+
+  // Pricing-strategy consistency: flat needs a positive base price, hourly needs a positive hourly rate.
+  if (input.price_strategy === 'flat' && (input.base_price_cents == null || input.base_price_cents <= 0)) {
     return NextResponse.json(
-      { error: 'invalid_request', message: 'Hourly services require hourly_rate_cents' },
+      { error: 'invalid_request', message: 'Flat-rate services require a positive base_price_cents' },
+      { status: 400 }
+    )
+  }
+  if (input.price_strategy === 'hourly' && (input.hourly_rate_cents == null || input.hourly_rate_cents <= 0)) {
+    return NextResponse.json(
+      { error: 'invalid_request', message: 'Hourly services require a positive hourly_rate_cents' },
       { status: 400 }
     )
   }

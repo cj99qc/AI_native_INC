@@ -3,13 +3,14 @@ import { z } from 'zod'
 import { createServerSupabase } from '@/lib/supabase/server'
 
 const UPDATE_SERVICE_SCHEMA = z.object({
+  service_slug: z.string().min(1).optional(),
   display_name: z.string().min(1).max(200).optional(),
-  description: z.string().max(1000).optional(),
+  description: z.string().max(1000).nullable().optional(),
   price_strategy: z.enum(['flat', 'hourly', 'quote']).optional(),
-  base_price_cents: z.number().int().min(0).optional(),
-  hourly_rate_cents: z.number().int().min(0).optional(),
-  min_charge_cents: z.number().int().min(0).optional(),
-  estimated_duration_minutes: z.number().int().min(0).optional(),
+  base_price_cents: z.number().int().min(0).nullable().optional(),
+  hourly_rate_cents: z.number().int().min(0).nullable().optional(),
+  min_charge_cents: z.number().int().min(0).nullable().optional(),
+  estimated_duration_minutes: z.number().int().min(0).nullable().optional(),
   is_active: z.boolean().optional(),
 })
 
@@ -87,31 +88,50 @@ export async function PATCH(
     return NextResponse.json({ error: 'forbidden' }, { status: 403 })
   }
 
-  // Validate price_strategy and required fields if changed
-  const strategy = input.price_strategy ?? existing.price_strategy
-  if (strategy === 'flat' && !input.base_price_cents && !existing.base_price_cents) {
+  // If service_slug is changing, verify it points to a real category.
+  if (input.service_slug && input.service_slug !== existing.service_slug) {
+    const { data: cat } = await supabase
+      .from('service_categories')
+      .select('slug')
+      .eq('slug', input.service_slug)
+      .maybeSingle()
+    if (!cat) {
+      return NextResponse.json(
+        { error: 'invalid_request', message: `Unknown service category: ${input.service_slug}` },
+        { status: 400 }
+      )
+    }
+  }
+
+  // Effective values after the patch is applied — use to validate the merged state.
+  const effectiveStrategy = input.price_strategy ?? existing.price_strategy
+  const effectiveBase   = input.base_price_cents  !== undefined ? input.base_price_cents  : existing.base_price_cents
+  const effectiveHourly = input.hourly_rate_cents !== undefined ? input.hourly_rate_cents : existing.hourly_rate_cents
+
+  if (effectiveStrategy === 'flat' && (effectiveBase == null || effectiveBase <= 0)) {
     return NextResponse.json(
-      { error: 'invalid_request', message: 'Flat-rate services require base_price_cents' },
+      { error: 'invalid_request', message: 'Flat-rate services require a positive base_price_cents' },
       { status: 400 }
     )
   }
-  if (strategy === 'hourly' && !input.hourly_rate_cents && !existing.hourly_rate_cents) {
+  if (effectiveStrategy === 'hourly' && (effectiveHourly == null || effectiveHourly <= 0)) {
     return NextResponse.json(
-      { error: 'invalid_request', message: 'Hourly services require hourly_rate_cents' },
+      { error: 'invalid_request', message: 'Hourly services require a positive hourly_rate_cents' },
       { status: 400 }
     )
   }
 
-  const updateData: Record<string, unknown> = {}
-  if (input.display_name !== undefined) updateData.display_name = input.display_name
-  if (input.description !== undefined) updateData.description = input.description
+  // Build the patch — only include fields the client explicitly sent.
+  const updateData: Record<string, unknown> = { updated_at: new Date().toISOString() }
+  if (input.service_slug   !== undefined) updateData.service_slug   = input.service_slug
+  if (input.display_name   !== undefined) updateData.display_name   = input.display_name
+  if (input.description    !== undefined) updateData.description    = input.description
   if (input.price_strategy !== undefined) updateData.price_strategy = input.price_strategy
-  if (input.base_price_cents !== undefined) updateData.base_price_cents = input.base_price_cents
-  if (input.hourly_rate_cents !== undefined) updateData.hourly_rate_cents = input.hourly_rate_cents
-  if (input.min_charge_cents !== undefined) updateData.min_charge_cents = input.min_charge_cents
+  if (input.base_price_cents          !== undefined) updateData.base_price_cents          = input.base_price_cents
+  if (input.hourly_rate_cents         !== undefined) updateData.hourly_rate_cents         = input.hourly_rate_cents
+  if (input.min_charge_cents          !== undefined) updateData.min_charge_cents          = input.min_charge_cents
   if (input.estimated_duration_minutes !== undefined) updateData.estimated_duration_minutes = input.estimated_duration_minutes
-  if (input.is_active !== undefined) updateData.is_active = input.is_active
-  updateData.updated_at = new Date().toISOString()
+  if (input.is_active      !== undefined) updateData.is_active      = input.is_active
 
   const { data: service, error: updateError } = await supabase
     .from('provider_services')

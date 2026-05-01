@@ -1,4 +1,4 @@
-import { openai } from './openai'
+import { getOpenAI } from './openai'
 
 /**
  * Generate a text embedding for a product using OpenAI text-embedding-3-small.
@@ -14,7 +14,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   }
 
   try {
-    const response = await openai.embeddings.create({
+    const response = await getOpenAI().embeddings.create({
       model: 'text-embedding-3-small',
       input: text.trim(),
     })

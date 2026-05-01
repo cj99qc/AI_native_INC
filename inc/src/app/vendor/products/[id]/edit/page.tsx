@@ -25,7 +25,8 @@ const productSchema = z.object({
   stock:       z.number().int().min(0).default(0),
 })
 
-type ProductFormData = z.infer<typeof productSchema>
+type ProductFormInput = z.input<typeof productSchema>
+type ProductFormData = z.output<typeof productSchema>
 
 export default function ProductEditPage() {
   const { user, loading: authLoading } = useAuth()
@@ -68,7 +69,7 @@ export default function ProductEditPage() {
     watch,
     reset,
     formState: { errors, isSubmitting },
-  } = useForm<ProductFormData>({
+  } = useForm<ProductFormInput, unknown, ProductFormData>({
     resolver: zodResolver(productSchema),
   })
 

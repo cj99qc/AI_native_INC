@@ -757,4 +757,141 @@ insert into public.product_categories (slug, name) values
   ('stationery',   'Stationery & Office')
 on conflict (slug) do nothing;
 
+-- ============================================================================
+-- SERVICE PROVIDERS (Step 3: Multi-Service Providers)
+-- ============================================================================
+-- A service_providers row represents a tradesperson/professional (plumber,
+-- electrician, etc.). Each provider can offer multiple services with their
+-- own pricing via the provider_services junction table.
+
+create table if not exists public.service_providers (
+  id            uuid primary key default uuid_generate_v4(),
+  user_id       uuid unique references auth.users(id) on delete cascade,
+  name          text not null,
+  service_type  text,  -- DEPRECATED: kept for backwards compat with old single-service queries
+  description   text,
+  contact_info  jsonb,
+  location      geography(point, 4326) not null,
+  hours         jsonb default '{}'::jsonb,
+  timezone      text not null default 'Asia/Kolkata',
+  is_active     boolean default true,
+  created_at    timestamptz default now(),
+  updated_at    timestamptz default now()
+);
+
+create index if not exists idx_service_providers_location  on public.service_providers using gist(location);
+create index if not exists idx_service_providers_user_id   on public.service_providers(user_id);
+create index if not exists idx_service_providers_active    on public.service_providers(is_active) where is_active = true;
+
+drop trigger if exists update_service_providers_updated_at on public.service_providers;
+create trigger update_service_providers_updated_at
+  before update on public.service_providers
+  for each row execute function update_updated_at_column();
+
+alter table public.service_providers enable row level security;
+
+drop policy if exists service_providers_public_read on public.service_providers;
+create policy service_providers_public_read on public.service_providers
+  for select using (is_active = true);
+
+drop policy if exists service_providers_owner_write on public.service_providers;
+create policy service_providers_owner_write on public.service_providers
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Service categories taxonomy
+create table if not exists public.service_categories (
+  slug        text primary key,
+  name        text not null,
+  description text,
+  parent_slug text references public.service_categories(slug),
+  created_at  timestamptz not null default now()
+);
+
+insert into public.service_categories (slug, name, description) values
+  ('plumber',          'Plumber',                    'Plumbing repair and installation'),
+  ('electrician',      'Electrician',                'Electrical repair and installation'),
+  ('carpenter',        'Carpenter',                  'Carpentry and woodwork'),
+  ('painter',          'Painter',                    'Interior and exterior painting'),
+  ('cleaner',          'House Cleaner',              'Residential cleaning services'),
+  ('handyman',         'Handyman',                   'General home repairs and maintenance'),
+  ('appliance_repair', 'Appliance Repair',           'Refrigerator, washing machine, etc.'),
+  ('hvac',             'HVAC Technician',            'Heating, ventilation, air conditioning'),
+  ('locksmith',        'Locksmith',                  'Lock repair, rekeying, emergency access'),
+  ('pest_control',     'Pest Control',               'Pest and termite control'),
+  ('gardener',         'Gardener / Landscaping',     'Gardening, lawn care, landscaping'),
+  ('mover',            'Mover / Hauling',            'Moving and heavy item hauling'),
+  ('tutor',            'Tutor',                      'Academic tutoring and coaching'),
+  ('beautician',       'Beautician / Salon at Home', 'Hair, makeup, beauty services'),
+  ('caterer',          'Home Caterer / Baker',       'Catering and baking services')
+on conflict (slug) do update set
+  name        = excluded.name,
+  description = excluded.description;
+
+-- Provider × service junction (each row is one priced service offering)
+create table if not exists public.provider_services (
+  id                          uuid primary key default gen_random_uuid(),
+  provider_id                 uuid not null references public.service_providers(id) on delete cascade,
+  service_slug                text not null references public.service_categories(slug),
+  display_name                text not null,
+  description                 text,
+  price_strategy              text not null check (price_strategy in ('flat', 'hourly', 'quote')),
+  base_price_cents            integer,
+  hourly_rate_cents           integer,
+  min_charge_cents            integer,
+  estimated_duration_minutes  integer,
+  is_active                   boolean not null default true,
+  created_at                  timestamptz not null default now(),
+  updated_at                  timestamptz not null default now(),
+  -- Pricing-strategy consistency: flat needs base_price; hourly needs hourly_rate
+  constraint provider_services_price_strategy_consistency check (
+    (price_strategy = 'flat'   and base_price_cents  is not null) or
+    (price_strategy = 'hourly' and hourly_rate_cents is not null) or
+    (price_strategy = 'quote')
+  )
+);
+
+create index if not exists idx_provider_services_provider on public.provider_services(provider_id);
+create index if not exists idx_provider_services_slug     on public.provider_services(service_slug);
+create index if not exists idx_provider_services_active   on public.provider_services(is_active) where is_active = true;
+
+drop trigger if exists update_provider_services_updated_at on public.provider_services;
+create trigger update_provider_services_updated_at
+  before update on public.provider_services
+  for each row execute function update_updated_at_column();
+
+alter table public.provider_services enable row level security;
+
+drop policy if exists provider_services_public_read on public.provider_services;
+create policy provider_services_public_read on public.provider_services
+  for select using (
+    is_active = true
+    and provider_id in (select id from public.service_providers where is_active = true)
+  );
+
+drop policy if exists provider_services_owner_write on public.provider_services;
+create policy provider_services_owner_write on public.provider_services
+  for all using (
+    provider_id in (select id from public.service_providers where user_id = auth.uid())
+  ) with check (
+    provider_id in (select id from public.service_providers where user_id = auth.uid())
+  );
+
+-- Backfill: any existing service_providers row with a service_type but no
+-- provider_services row gets a placeholder "quote" entry so the new system
+-- doesn't lose them. Safe to run multiple times.
+insert into public.provider_services
+  (provider_id, service_slug, display_name, price_strategy, description)
+select
+  sp.id,
+  sp.service_type,
+  coalesce(sp.name, 'Service offering'),
+  'quote',
+  'Migrated from legacy service_type — please update pricing'
+from public.service_providers sp
+where sp.service_type is not null
+  and exists (select 1 from public.service_categories sc where sc.slug = sp.service_type)
+  and not exists (
+    select 1 from public.provider_services ps where ps.provider_id = sp.id
+  );
+
 grant execute on function expire_auctions() to anon, authenticated;

@@ -576,113 +576,86 @@ async def get_availability(
         radius_m = radius_km * 1000  # ST_DWithin uses metres for GEOGRAPHY
 
         with conn.cursor() as cur:
-            # Primary query: active providers with matching services within radius
+            # Single query with JSON aggregation: returns each matching provider
+            # along with all their offerings for this service slug. Replaces the
+            # previous DISTINCT + N+1 fetch loop.
             cur.execute("""
-                SELECT DISTINCT
-                    sp.id::text,
-                    sp.name,
-                    sp.service_type,
-                    sp.description,
-                    sp.contact_info,
+                SELECT
+                    sp.id::text                  AS id,
+                    sp.name                      AS name,
+                    sp.service_type              AS service_type,
+                    sp.description               AS description,
+                    sp.contact_info              AS contact_info,
                     ST_Distance(
                         sp.location,
                         ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
-                    ) / 1000.0 AS distance_km
+                    ) / 1000.0                   AS distance_km,
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'id',                ps.id::text,
+                            'display_name',      ps.display_name,
+                            'description',       ps.description,
+                            'price_strategy',    ps.price_strategy,
+                            'base_price_cents',  ps.base_price_cents,
+                            'hourly_rate_cents', ps.hourly_rate_cents
+                        ) ORDER BY ps.display_name
+                    ) FILTER (WHERE ps.id IS NOT NULL) AS services
                 FROM service_providers sp
-                INNER JOIN provider_services ps ON sp.id = ps.provider_id
+                INNER JOIN provider_services ps
+                    ON ps.provider_id = sp.id
+                   AND ps.is_active = true
+                   AND ps.service_slug = %s
                 WHERE sp.is_active = true
-                  AND ps.is_active = true
-                  AND ps.service_slug = %s
                   AND ST_DWithin(
                         sp.location,
                         ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
                         %s
                   )
+                GROUP BY sp.id
                 ORDER BY distance_km ASC
             """, (lng, lat, search_service, lng, lat, radius_m))
 
             provider_rows = cur.fetchall()
 
-            # For each provider, fetch their services for this category
-            providers_dict = {}
-            for row in provider_rows:
-                provider_id = row["id"]
-                if provider_id not in providers_dict:
-                    providers_dict[provider_id] = {
-                        "id": provider_id,
-                        "name": row["name"],
-                        "service_type": row["service_type"],
-                        "description": row["description"],
-                        "contact_info": row["contact_info"],
-                        "distance_km": round(float(row["distance_km"]), 2),
-                        "services": []
-                    }
-
-            # Fetch services for these providers
-            if providers_dict:
-                provider_ids = list(providers_dict.keys())
-                placeholders = ','.join(['%s'] * len(provider_ids))
-                cur.execute(f"""
-                    SELECT
-                        id::text,
-                        provider_id::text,
-                        display_name,
-                        description,
-                        price_strategy,
-                        base_price_cents,
-                        hourly_rate_cents
-                    FROM provider_services
-                    WHERE provider_id = ANY(ARRAY[{placeholders}]::uuid[])
-                      AND service_slug = %s
-                      AND is_active = true
-                """, provider_ids + [search_service])
-
-                for service_row in cur.fetchall():
-                    provider_id = service_row["provider_id"]
-                    if provider_id in providers_dict:
-                        providers_dict[provider_id]["services"].append(
-                            ServiceOffering(
-                                id=service_row["id"],
-                                display_name=service_row["display_name"],
-                                description=service_row["description"],
-                                price_strategy=service_row["price_strategy"],
-                                base_price_cents=service_row["base_price_cents"],
-                                hourly_rate_cents=service_row["hourly_rate_cents"],
-                            )
-                        )
-
         providers = [
             ServiceProviderResult(
-                id=p["id"],
-                name=p["name"],
-                service_type=p["service_type"],
-                description=p["description"],
-                contact_info=p["contact_info"],
-                distance_km=p["distance_km"],
-                services=p["services"],
+                id=row["id"],
+                name=row["name"],
+                service_type=row.get("service_type"),
+                description=row.get("description"),
+                contact_info=row.get("contact_info"),
+                distance_km=round(float(row["distance_km"]), 2),
+                services=[ServiceOffering(**s) for s in (row.get("services") or [])],
             )
-            for p in providers_dict.values()
+            for row in provider_rows
         ]
 
         # InC Psychology: never leave the user with nothing to act on
         recommendation = None
         if not providers:
             with conn.cursor() as cur:
+                # Search the new junction table — this is the system of record.
+                # Falls back to deprecated service_type if no provider_services
+                # row exists yet (legacy data not yet migrated).
                 cur.execute("""
                     SELECT
-                        id::text,
-                        name,
-                        service_type,
+                        sp.id::text,
+                        sp.name,
+                        sp.service_type,
                         ST_Distance(
-                            location,
+                            sp.location,
                             ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography
                         ) / 1000.0 AS distance_km
-                    FROM service_providers
-                    WHERE is_active = true
-                      AND service_type = %s
+                    FROM service_providers sp
+                    LEFT JOIN provider_services ps
+                        ON ps.provider_id = sp.id
+                       AND ps.is_active = true
+                       AND ps.service_slug = %s
+                    WHERE sp.is_active = true
+                      AND (ps.id IS NOT NULL OR sp.service_type = %s)
                     ORDER BY distance_km ASC
                     LIMIT 1
-                """, (lng, lat, service_type))
+                """, (lng, lat, search_service, search_service))
                 nearest = cur.fetchone()
 
             if nearest:
@@ -699,7 +672,7 @@ async def get_availability(
                     f"here's your nearest option"
                 )
             else:
-                message = f"No {service_type} providers available right now"
+                message = f"No {search_service} providers available right now"
         else:
             count = len(providers)
             message = (

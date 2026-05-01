@@ -3,7 +3,9 @@
     "allow": [
       "Bash(git add *)",
       "Bash(git commit -m 'Step 2: Complete product catalog with forms, CRUD API, image upload, and embeddings *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(npx tsc *)",
+      "Bash(python3 *)"
     ]
   }
 }
